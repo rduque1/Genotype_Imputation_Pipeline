@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  imputation-pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: imputation-pipeline:latest
+    container_name: genotype-imputation
+    volumes:
+      # Mount the pipeline scripts
+      - ./:/pipeline
+      # Mount your data directory (adjust path as needed)
+      - ./data:/data
+      # Mount your reference panels (adjust path as needed)
+      - ./reference_panels:/reference_panels
+      # Mount output directory
+      - ./output:/output
+    working_dir: /pipeline
+    # Allocate resources
+    mem_limit: 64g
+    cpus: 16
+    # Keep container running
+    stdin_open: true
+    tty: true
+    command: /bin/bash

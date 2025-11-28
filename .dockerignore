@@ -1,0 +1,38 @@
+# Ignore large reference files
+*.vcf.gz
+*.vcf
+*.bcf
+*.m3vcf.gz
+*.tbi
+*.csi
+
+# Ignore output directories
+0_check_vcf_build/
+1_lift/
+2_GH/
+3_ancestry/
+4_split_QC2/
+5_phase/
+6_impute_*/
+
+# Ignore git files
+.git/
+.gitignore
+
+# Ignore documentation
+*.md
+!README.md
+
+# Ignore archived versions
+archived/
+
+# Ignore logs
+*.log
+*.out
+*.err
+*.o*
+
+# Ignore temporary files
+*.tmp
+temp/
+tmp/
