@@ -93,7 +93,7 @@ COPY required_tools/Eagle_v2.4.1 /opt/eagle
 RUN ln -s /opt/eagle/eagle /usr/local/bin/eagle && \
     chmod +x /opt/eagle/eagle
 
-# Copy Minimac4
+# Copy Minimac4 v4.1.6
 COPY required_tools/minimac4 /usr/local/bin/minimac4
 RUN chmod +x /usr/local/bin/minimac4
 
@@ -154,6 +154,17 @@ ENV JAVA_HOME="/usr/lib/jvm/java-11-openjdk-amd64"
 
 # Set working directory for pipeline
 WORKDIR /pipeline
+
+################################################################################
+# Re-install Minimac4 to ensure correct setup
+################################################################################
+# RUN wget https://github.com/statgen/Minimac4/releases/download/v4.1.6/minimac4-4.1.6-Linux-x86_64.sh
+# RUN yes | bash minimac4-4.1.6-Linux-x86_64.sh -b -p /usr/local/bin/minimac4 > /mynimac4_install.log 2>&1
+# RUN mv minimac4-4.1.6-Linux-x86_64 minimac4
+# RUN mv /pipeline/minimac4/bin/minimac4 /usr/local/bin/minimac4
+# RUN chmod +x /usr/local/bin/minimac4
+# RUN rm minimac4-4.1.6-Linux-x86_64.sh
+# RUN rm -rf /pipeline/minimac4
 
 ################################################################################
 # Verify installations
