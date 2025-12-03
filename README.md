@@ -187,3 +187,11 @@ Install dependencies: bcftools, samtools, vcftools, tabix, PLINK v1.9/2.0, R, Ja
 - **Out of memory**: Increase `--memory=128g` or reduce `--threads`
 - **Reference not found**: Prepare reference panel first (see Quick Start step 2)
 - **X chromosome missing**: Ensure reference panel includes chrX files (see step 2)
+
+
+
+## Examples
+
+```bash
+ bash imputation_pipeline.sh --vcf id_600.input_data.zip --out /output_dir --threads 1 --ref-path /vcf_ref --ref-bcf /reference_prepared/bcf --ref-m3vcf /reference_prepared/m3vcf --chr 2
+```

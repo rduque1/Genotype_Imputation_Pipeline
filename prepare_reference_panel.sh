@@ -120,6 +120,18 @@ print_info "Threads: $THREADS"
 # Create directory structure
 mkdir -p "$OUTPUT_DIR"/{vcf,bcf,m3vcf}
 
+# Download reference genome fasta file
+if [ ! -f "human_g1k_v37.fasta.gz" ]; then
+    print_info "Downloading reference genome fasta..."
+    wget ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/technical/reference/human_g1k_v37.fasta.gz
+    wget ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/technical/reference/human_g1k_v37.fasta.fai
+    
+    print_info "Fixing reference genome compression format..."
+    gunzip human_g1k_v37.fasta.gz
+    bgzip human_g1k_v37.fasta
+    samtools faidx human_g1k_v37.fasta.gz
+fi
+
 ################################################################################
 # Step 1: Copy/Link VCF files
 ################################################################################
@@ -155,29 +167,25 @@ print_success "VCF files linked successfully"
 if [[ "$SKIP_BCF" == false ]]; then
     print_info "Step 2: Converting VCF to BCF format for phasing..."
 
-    for chr in {1..22}; do
+    for chr in {1..22} X; do
         print_info "Converting chromosome $chr to BCF..."
 
         INPUT_VCF="$OUTPUT_DIR/vcf/ALL.chr${chr}.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.vcf.gz"
         OUTPUT_BCF="$OUTPUT_DIR/bcf/ALL.chr${chr}.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.bcf"
 
+        if [[ "$chr" == "X" ]]; then
+            INPUT_VCF="$OUTPUT_DIR/vcf/ALL.chrX.phase3_shapeit2_mvncall_integrated_v1b.20130502.genotypes.vcf.gz"
+            OUTPUT_BCF="$OUTPUT_DIR/bcf/ALL.chrX.phase3_shapeit2_mvncall_integrated_v1b.20130502.genotypes.bcf"
+        fi
+
         if [[ ! -f "$OUTPUT_BCF" ]]; then
+            print_info "Converting $INPUT_VCF to BCF..."
             bcftools view -Ob -o "$OUTPUT_BCF" "$INPUT_VCF" --threads "$THREADS"
             bcftools index "$OUTPUT_BCF"
         else
             print_info "BCF for chr$chr already exists, skipping..."
         fi
     done
-
-    # Handle chrX separately
-    print_info "Converting chromosome X to BCF..."
-    INPUT_VCF="$OUTPUT_DIR/vcf/ALL.chrX.phase3_shapeit2_mvncall_integrated_v1b.20130502.genotypes.vcf.gz"
-    OUTPUT_BCF="$OUTPUT_DIR/bcf/ALL.chrX.phase3_shapeit2_mvncall_integrated_v1b.20130502.genotypes.bcf"
-
-    if [[ ! -f "$OUTPUT_BCF" ]]; then
-        bcftools view -Ob -o "$OUTPUT_BCF" "$INPUT_VCF" --threads "$THREADS"
-        bcftools index "$OUTPUT_BCF"
-    fi
 
     print_success "BCF conversion completed"
 else
@@ -192,16 +200,27 @@ if [[ "$SKIP_M3VCF" == false ]]; then
     print_info "Step 3: Converting VCF to M3VCF format for imputation..."
     print_info "This may take a while..."
 
-    for chr in {1..22}; do
+    for chr in {1..22} X; do
         print_info "Converting chromosome $chr to M3VCF..."
 
         INPUT_VCF="$OUTPUT_DIR/vcf/ALL.chr${chr}.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.vcf.gz"
         OUTPUT_M3VCF="$OUTPUT_DIR/m3vcf/ALL.chr${chr}.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.m3vcf.gz"
 
+        if [[ "$chr" == "X" ]]; then
+            INPUT_VCF="$OUTPUT_DIR/vcf/ALL.chrX.phase3_shapeit2_mvncall_integrated_v1b.20130502.genotypes.vcf.gz"
+            OUTPUT_M3VCF="$OUTPUT_DIR/m3vcf/ALL.chrX.phase3_shapeit2_mvncall_integrated_v1b.20130502.genotypes.m3vcf.gz"
+        fi
+
         if [[ ! -f "$OUTPUT_M3VCF" ]]; then
-            minimac4 --compress-reference "$INPUT_VCF" \
-                     --output "$OUTPUT_M3VCF" \
-                     --threads "$THREADS"
+            if [[ "$chr" == "X" ]]; then
+                # Chromosome X has mixed ploidy issues with older minimac4 versions
+                print_info "Skipping chromosome X M3VCF conversion (requires newer minimac4 with --refSex support)"
+                print_info "You can use a pre-built reference panel or upgrade minimac4"
+            else
+                minimac4 --compress-reference "$INPUT_VCF" \
+                         --output "$OUTPUT_M3VCF" \
+                         --threads "$THREADS"
+            fi
         else
             print_info "M3VCF for chr$chr already exists, skipping..."
         fi
