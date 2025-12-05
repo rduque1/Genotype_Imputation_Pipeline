@@ -206,8 +206,8 @@ if [[ -z "$OUTROOT" ]]; then
     exit 1
 fi
 
-if [[ "$REF_MODE" != "HRC" ]] && [[ "$REF_MODE" != "1KG" ]]; then
-    print_error "Reference panel must be 'HRC' or '1KG'"
+if [[ "$REF_MODE" != "1KG" ]]; then
+    print_error "Reference panel must be '1KG'"
     exit 1
 fi
 
@@ -356,7 +356,8 @@ get_chr_range() {
         echo "$CHR_ONLY"
     else
         # Default to autosomes + X chromosome (output as space-separated list for iteration)
-        echo "1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 X"
+        # echo "1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 X"
+        echo "1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22"
     fi
 }
 
@@ -700,7 +701,8 @@ if [[ $START_FROM -le 3 ]] && [[ $STOP_AFTER -ge 3 ]]; then
     if [[ -n "$REF_PATH_CUSTOM" ]]; then
         REF_VCF_PATH="$REF_PATH_CUSTOM"
     else
-        REF_VCF_PATH="${REF_PATH:-/mnt/stsi/stsi3/External/1000G/ref_panel/hg19}"
+        print_error "Custom reference path is required for ancestry analysis step (--ref-path)"
+        exit 1
     fi
 
     # Intersect with reference and MERGE them together (like archived pipeline)
@@ -933,12 +935,9 @@ if [[ $START_FROM -le 5 ]] && [[ $STOP_AFTER -ge 5 ]]; then
     if [[ -n "$REF_BCF_CUSTOM" ]]; then
         REF_BASE="$REF_BCF_CUSTOM"
         print_info "Using custom BCF reference path: $REF_BASE"
-    elif [[ "$REF_MODE" == "1KG" ]]; then
-        REF_BASE="/mnt/stsi/stsi3/Internal/1000G/ref_panel/hg19/bcf"
-        print_info "Using 1000 Genomes reference panel"
     else
-        REF_BASE="/mnt/stsi/stsi3/Internal/HRC/ref_panel/hg19/bcf"
-        print_info "Using HRC reference panel"
+        print_error "Custom BCF reference path is required for phasing step (--ref-bcf-path)"
+        exit 1
     fi
 
     # Phase each ancestry and chromosome
@@ -964,17 +963,9 @@ if [[ $START_FROM -le 5 ]] && [[ $STOP_AFTER -ge 5 ]]; then
 
         # Set reference file (handle X chromosome)
         if [[ "$chr" == "X" ]]; then
-            if [[ "$REF_MODE" == "1KG" ]]; then
-                MYREF="${REF_BASE}/ALL.chrX.phase3_shapeit2_mvncall_integrated_v1b.20130502.genotypes.bcf"
-            else
-                MYREF="${REF_BASE}/HRC.r1-1.EGA.GRCh37.chrX.haplotypes.bcf"
-            fi
+            MYREF="${REF_BASE}/ALL.chrX.phase3_shapeit2_mvncall_integrated_v1b.20130502.genotypes.bcf"
         else
-            if [[ "$REF_MODE" == "1KG" ]]; then
-                MYREF="${REF_BASE}/ALL.chr${chr}.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.bcf"
-            else
-                MYREF="${REF_BASE}/HRC.r1-1.EGA.GRCh37.chr${chr}.haplotypes.bcf"
-            fi
+            MYREF="${REF_BASE}/ALL.chr${chr}.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.bcf"
         fi
 
         # Run Eagle
@@ -1025,12 +1016,9 @@ if [[ $START_FROM -le 6 ]] && [[ $STOP_AFTER -ge 6 ]]; then
     if [[ -n "$REF_M3VCF_CUSTOM" ]]; then
         REF_BASE="$REF_M3VCF_CUSTOM"
         print_info "Using custom M3VCF reference path: $REF_BASE"
-    elif [[ "$REF_MODE" == "1KG" ]]; then
-        REF_BASE="/mnt/stsi/stsi3/Internal/1000G/ref_panel/hg19/m3vcf_erate_rec"
-        print_info "Using 1000 Genomes reference panel"
     else
-        REF_BASE="/mnt/stsi/stsi3/Internal/HRC/ref_panel/hg19/m3vcf_erate_rec"
-        print_info "Using HRC reference panel"
+        print_error "Custom M3VCF reference path is required for imputation step (--ref-m3vcf-path)"
+        exit 1
     fi
 
     # Impute each ancestry and chromosome
@@ -1040,7 +1028,7 @@ if [[ $START_FROM -le 6 ]] && [[ $STOP_AFTER -ge 6 ]]; then
 
         MYINPUT_STEP6="${OUTROOT}/5_phase/${PREFIX}/${PREFIX}.${LIFTED_CODE}.GH.ancestry-${anc}.chr${chr}.phased.vcf.gz"
 
-        if [[ ! -f "$MYINPUT_STEP6" ]]; then
+        if [[ ! -f "$MYINPUT_STEP6" ]]; then # No phased file for this ancestry/chromosome
             return
         fi
 
@@ -1052,30 +1040,27 @@ if [[ $START_FROM -le 6 ]] && [[ $STOP_AFTER -ge 6 ]]; then
 
         # Set reference file (handle X chromosome)
         if [[ "$chr" == "X" ]]; then
-            if [[ "$REF_MODE" == "1KG" ]]; then
-                MYREF="${REF_BASE}/ALL.chrX.phase3_shapeit2_mvncall_integrated_v1b.20130502.genotypes.m3vcf.gz"
-            else
-                MYREF="${REF_BASE}/HRC.r1-1.EGA.GRCh37.chrX.haplotypes.m3vcf.gz"
-            fi
+            for j in {PAR1,PAR2,nonPAR}; do
+                MYREF="${REF_BASE}/ALL.chrX_${j}.phase3_shapeit2_mvncall_integrated_v1b.20130502.genotypes.msav"
+                # Run Minimac4
+                minimac4 "$MYREF" "$MYINPUT_STEP6" \
+                    --output "imputed_${chr}_${j}.dose.vcf.gz" \
+                    --output-format vcf.gz \
+                    --min-ratio 0.001 --chunk 30000000 --overlap 3000000 --threads "$THREADS"
+            done
         else
-            if [[ "$REF_MODE" == "1KG" ]]; then
-                MYREF="${REF_BASE}/ALL.chr${chr}.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.m3vcf.gz"
-            else
-                MYREF="${REF_BASE}/HRC.r1-1.EGA.GRCh37.chr${chr}.haplotypes.m3vcf.gz"
-            fi
+            MYREF="${REF_BASE}/ALL.chr${chr}.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.msav"
+            # Run Minimac4
+            minimac4 "$MYREF" "$MYINPUT_STEP6" \
+                --output "imputed_${chr}.dose.vcf.gz" \
+                --output-format vcf.gz \
+                --min-ratio 0.001 --chunk 30000000 --overlap 3000000 --threads "$THREADS"
         fi
 
-        # Run Minimac4
-        minimac4 "$MYREF" "$MYINPUT_STEP6" \
-            --output "imputed_${chr}.dose.vcf.gz" \
-            --output-format vcf.gz \
-            --min-ratio 0.001 --chunk 30000000 --overlap 3000000 --threads "$THREADS"
-
-        # The output from minimac4 with --output is a prefix, so it will generate imputed_${chr}.dose.vcf.gz
         # Sort the file before indexing, as minimac4 output may not be sorted.
-        bcftools sort "imputed_${chr}.dose.vcf.gz" -Oz -o "imputed_${chr}.dose.sorted.vcf.gz"
-        mv "imputed_${chr}.dose.sorted.vcf.gz" "imputed_${chr}.dose.vcf.gz"
-        tabix -p vcf "imputed_${chr}.dose.vcf.gz"
+        # bcftools sort "imputed_${chr}.dose.vcf.gz" -Oz -o "imputed_${chr}.dose.sorted.vcf.gz"
+        # mv "imputed_${chr}.dose.sorted.vcf.gz" "imputed_${chr}.dose.vcf.gz"
+        # tabix -p vcf "imputed_${chr}.dose.vcf.gz"
     }
 
     export -f impute_chr

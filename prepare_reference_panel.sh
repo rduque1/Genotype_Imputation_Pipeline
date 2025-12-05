@@ -5,7 +5,7 @@
 #
 # This script prepares the 1000 Genomes Phase 3 reference panel for use
 # with the imputation pipeline. It creates the necessary directory structure
-# and converts VCF files to BCF and M3VCF formats.
+# and converts VCF files to BCF and MSAV formats.
 #
 # Usage: bash prepare_reference_panel.sh --vcf-dir <path> --output-dir <path>
 ################################################################################
@@ -42,7 +42,7 @@ Required Arguments:
 Optional Arguments:
   --threads NUM           Number of threads to use (default: 4)
   --skip-bcf              Skip BCF conversion (for phasing)
-  --skip-m3vcf            Skip M3VCF conversion (for imputation)
+  --skip-msav             Skip MSAV conversion (for imputation)
   --help                  Show this help message
 
 Example:
@@ -59,7 +59,7 @@ VCF_DIR=""
 OUTPUT_DIR=""
 THREADS=4
 SKIP_BCF=false
-SKIP_M3VCF=false
+SKIP_MSAV=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -80,8 +80,8 @@ while [[ $# -gt 0 ]]; do
             SKIP_BCF=true
             shift
             ;;
-        --skip-m3vcf)
-            SKIP_M3VCF=true
+        --skip-msav)
+            SKIP_MSAV=true
             shift
             ;;
         --help)
@@ -118,18 +118,21 @@ print_info "Output directory: $OUTPUT_DIR"
 print_info "Threads: $THREADS"
 
 # Create directory structure
-mkdir -p "$OUTPUT_DIR"/{vcf,bcf,m3vcf}
+mkdir -p "$OUTPUT_DIR"/{vcf,bcf,msav,fasta}
 
 # Download reference genome fasta file
-if [ ! -f "human_g1k_v37.fasta.gz" ]; then
+if [ ! -f "$OUTPUT_DIR/fasta/human_g1k_v37.fasta.gz" ]; then
     print_info "Downloading reference genome fasta..."
     wget ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/technical/reference/human_g1k_v37.fasta.gz
     wget ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/technical/reference/human_g1k_v37.fasta.fai
-    
+
     print_info "Fixing reference genome compression format..."
     gunzip human_g1k_v37.fasta.gz
     bgzip human_g1k_v37.fasta
     samtools faidx human_g1k_v37.fasta.gz
+    mv human_g1k_v37.fasta.gz "$OUTPUT_DIR/fasta/"
+    mv human_g1k_v37.fasta.fai "$OUTPUT_DIR/fasta/"
+    print_success "Reference genome fasta downloaded and indexed"
 fi
 
 ################################################################################
@@ -193,42 +196,69 @@ else
 fi
 
 ################################################################################
-# Step 3: Convert to M3VCF format (for imputation with Minimac4)
+# Step 3: Convert to msav format (for imputation with Minimac4)
 ################################################################################
 
-if [[ "$SKIP_M3VCF" == false ]]; then
-    print_info "Step 3: Converting VCF to M3VCF format for imputation..."
+if [[ "$SKIP_MSAV" == false ]]; then
+    print_info "Step 3: Converting VCF to msav format for imputation..."
     print_info "This may take a while..."
 
     for chr in {1..22} X; do
-        print_info "Converting chromosome $chr to M3VCF..."
-
+        print_info "Converting chromosome $chr to msav..."
         INPUT_VCF="$OUTPUT_DIR/vcf/ALL.chr${chr}.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.vcf.gz"
-        OUTPUT_M3VCF="$OUTPUT_DIR/m3vcf/ALL.chr${chr}.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.m3vcf.gz"
+        OUTPUT_MSAV="$OUTPUT_DIR/msav/ALL.chr${chr}.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.msav"
 
         if [[ "$chr" == "X" ]]; then
             INPUT_VCF="$OUTPUT_DIR/vcf/ALL.chrX.phase3_shapeit2_mvncall_integrated_v1b.20130502.genotypes.vcf.gz"
-            OUTPUT_M3VCF="$OUTPUT_DIR/m3vcf/ALL.chrX.phase3_shapeit2_mvncall_integrated_v1b.20130502.genotypes.m3vcf.gz"
+            OUTPUT_MSAV="$OUTPUT_DIR/msav/ALL.chrX_PAR1.phase3_shapeit2_mvncall_integrated_v1b.20130502.genotypes.msav"
         fi
 
-        if [[ ! -f "$OUTPUT_M3VCF" ]]; then
+        if [[ ! -f "$OUTPUT_MSAV" ]]; then
             if [[ "$chr" == "X" ]]; then
+                # PAR1
+                bcftools view -r X:60001-2699520 $INPUT_VCF -Oz -o X_PAR1.vcf.gz
+                tabix -p vcf X_PAR1.vcf.gz
+
+                # nonPAR
+                bcftools view -r X:2699521-154931043 $INPUT_VCF -Oz -o X_nonPAR.vcf.gz
+                tabix -p vcf X_nonPAR.vcf.gz
+
+                # PAR2
+                bcftools view -r X:154931044-155260560 $INPUT_VCF -Oz -o X_PAR2.vcf.gz
+                tabix -p vcf X_PAR2.vcf.gz
+
+                echo "> Checking male ploidy in nonPAR (just to avoid cursed VCF errors)"
+                bcftools +fixploidy X_nonPAR.vcf.gz -- --check || true
+
+                # Optional auto-fix ploidy if needed
+                # Uncomment this block if your data screams
+                #
+                # echo "> Auto-fixing ploidy issues in nonPAR"
+                # bcftools +fixploidy X_nonPAR.vcf.gz -- -f > X_nonPAR.fixed.vcf
+                # bgzip X_nonPAR.fixed.vcf
+                # mv X_nonPAR.fixed.vcf.gz X_nonPAR.vcf.gz
+                # tabix -p vcf X_nonPAR.vcf.gz
+
+                minimac4 --compress-reference X_PAR1.vcf.gz > $OUTPUT_DIR/msav/ALL.chrX_PAR1.phase3_shapeit2_mvncall_integrated_v1b.20130502.genotypes.msav
+                minimac4 --compress-reference X_nonPAR.vcf.gz > $OUTPUT_DIR/msav/ALL.chrX_nonPAR.phase3_shapeit2_mvncall_integrated_v1b.20130502.genotypes.msav
+                minimac4 --compress-reference X_PAR2.vcf.gz > $OUTPUT_DIR/msav/ALL.chrX_PAR2.phase3_shapeit2_mvncall_integrated_v1b.20130502.genotypes.msav
+
                 # Chromosome X has mixed ploidy issues with older minimac4 versions
-                print_info "Skipping chromosome X M3VCF conversion (requires newer minimac4 with --refSex support)"
+                print_info "Skipping chromosome X msav conversion (requires newer minimac4 with --refSex support)"
                 print_info "You can use a pre-built reference panel or upgrade minimac4"
             else
                 minimac4 --compress-reference "$INPUT_VCF" \
-                         --output "$OUTPUT_M3VCF" \
+                         --output "$OUTPUT_MSAV" \
                          --threads "$THREADS"
             fi
         else
-            print_info "M3VCF for chr$chr already exists, skipping..."
+            print_info "msav for chr$chr already exists, skipping..."
         fi
     done
 
-    print_success "M3VCF conversion completed"
+    print_success "msav conversion completed"
 else
-    print_info "Skipping M3VCF conversion (--skip-m3vcf)"
+    print_info "Skipping msav conversion (--skip-msav)"
 fi
 
 ################################################################################
@@ -250,14 +280,14 @@ REF_VCF_DIR=$OUTPUT_DIR/vcf
 # BCF files (for Phasing - Step 5)
 REF_BCF_DIR=$OUTPUT_DIR/bcf
 
-# M3VCF files (for Imputation - Step 6)
-REF_M3VCF_DIR=$OUTPUT_DIR/m3vcf
+# MSAV files (for Imputation - Step 6)
+REF_MSAV_DIR=$OUTPUT_DIR/msav
 
 # Usage in imputation pipeline:
 # Set these environment variables before running the pipeline:
 #   export REF_PATH=$OUTPUT_DIR/vcf
 #   export REF_BCF_BASE=$OUTPUT_DIR/bcf
-#   export REF_M3VCF_BASE=$OUTPUT_DIR/m3vcf
+#   export REF_MSAV_BASE=$OUTPUT_DIR/msav
 EOF
 
 print_success "Configuration file created: $CONFIG_FILE"
@@ -274,12 +304,12 @@ echo
 print_info "Directory structure:"
 print_info "  $OUTPUT_DIR/vcf/     - VCF files (for steps 2-3)"
 print_info "  $OUTPUT_DIR/bcf/     - BCF files (for step 5)"
-print_info "  $OUTPUT_DIR/m3vcf/   - M3VCF files (for step 6)"
+print_info "  $OUTPUT_DIR/msav/    - MSAV files (for step 6)"
 echo
 print_info "Configuration saved to: $CONFIG_FILE"
 echo
 print_info "To use with the imputation pipeline, update the script or set:"
 echo "  export REF_PATH='$OUTPUT_DIR/vcf'"
 echo "  export REF_BCF_BASE='$OUTPUT_DIR/bcf'"
-echo "  export REF_M3VCF_BASE='$OUTPUT_DIR/m3vcf'"
+echo "  export REF_MSAV_BASE='$OUTPUT_DIR/msav'"
 echo
