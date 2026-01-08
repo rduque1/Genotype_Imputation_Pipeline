@@ -118,7 +118,7 @@ print_info "Output directory: $OUTPUT_DIR"
 print_info "Threads: $THREADS"
 
 # Create directory structure
-mkdir -p "$OUTPUT_DIR"/{vcf,bcf,msav,fasta}
+mkdir -p "$OUTPUT_DIR"/{vcf,bcf,msav,fasta,ploidy}
 
 # Download reference genome fasta file
 if [ ! -f "$OUTPUT_DIR/fasta/human_g1k_v37.fasta.gz" ]; then
@@ -135,6 +135,33 @@ if [ ! -f "$OUTPUT_DIR/fasta/human_g1k_v37.fasta.gz" ]; then
     print_success "Reference genome fasta downloaded and indexed"
 fi
 
+# Create ploidy file for chromosome X
+PLOIDY_FILE="$OUTPUT_DIR/ploidy/ploidy.txt"
+print_info "Creating ploidy file for chromosome X..."
+
+# Download sample information to determine sex
+if [[ ! -f "$OUTPUT_DIR/ploidy/integrated_call_samples_v3.20130502.ALL.panel" ]]; then
+    print_info "Downloading sample panel file..."
+    wget -P "$OUTPUT_DIR/ploidy/" ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20130502/integrated_call_samples_v3.20130502.ALL.panel
+fi
+
+# Create ploidy file: sample_id chromosome ploidy
+print_info "Generating ploidy file..."
+{
+    # bcftools +fixploidy expects format: SAMPLE SEX
+    # SEX should be M (male) or F (female)
+    tail -n +2 "$OUTPUT_DIR/ploidy/integrated_call_samples_v3.20130502.ALL.panel" | while IFS=$'\t' read -r sample pop super_pop gender; do
+        if [[ "$gender" == "male" ]]; then
+            echo "$sample M"
+        else
+            echo "$sample F"
+        fi
+    done
+} > "$PLOIDY_FILE"
+
+print_success "Ploidy file created: $PLOIDY_FILE"
+
+
 ################################################################################
 # Step 1: Copy/Link VCF files
 ################################################################################
@@ -147,6 +174,49 @@ for chr in {1..22} X; do
     # For chrX, the filename is different
     if [[ "$chr" == "X" ]]; then
         VCF_FILE="$VCF_DIR/ALL.chrX.phase3_shapeit2_mvncall_integrated_v1b.20130502.genotypes.vcf.gz"
+
+        # First, fix ploidy for chromosome X
+        FIXED_VCF="$VCF_DIR/ALL.chrX.phase3_shapeit2_mvncall_integrated_v1b.20130502.genotypes.ploidy_fixed.vcf.gz"
+
+        if [[ ! -f "$FIXED_VCF" ]]; then
+            print_info "Fixing ploidy for chromosome X..."
+            bcftools +fixploidy "$VCF_FILE" -Oz -o "$FIXED_VCF" -- -s "$PLOIDY_FILE"
+            bcftools index -t "$FIXED_VCF"
+            print_success "Chromosome X ploidy fixed"
+        else
+            print_info "Ploidy-fixed chrX already exists, skipping..."
+        fi
+
+        # Extract PAR and non-PAR regions
+        for j in X_nonPAR X_PAR1 X_PAR2; do
+            REGION=""
+            FILTER="" # Initialize filter variable
+            if [[ "$j" == "X_nonPAR" ]]; then
+                REGION="X:2699521-154931043"
+                # Define filter *without* internal single quotes
+                FILTER="-i POS >= 2699521"
+            elif [[ "$j" == "X_PAR1" ]]; then
+                REGION="X:60001-2699520"
+                # No filter needed for PAR1
+            elif [[ "$j" == "X_PAR2" ]]; then
+                #REGION="X:154931044-155260560" !important: end coordinate not needed else not working
+                REGION="X:154931044-"
+                # Define filter *without* internal single quotes
+                FILTER="-i POS >= 154931044"
+            fi
+            VCF_OUT="$VCF_DIR/ALL.chr${j}.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.vcf.gz"
+            print_info "Extracting $j from chrX VCF (region: $REGION)..."
+            if [[ ! -f "$VCF_OUT" ]]; then
+                # Combine the region definition (-r) with the new filter ($FILTER)
+                bcftools view "$FIXED_VCF" -r "$REGION" $FILTER -o "$VCF_OUT" -O z
+                bcftools index -t "$VCF_OUT"
+            fi
+            # Create symlink to save space
+            ln -sf "$(realpath "$VCF_OUT")" "$OUTPUT_DIR/vcf/"
+            if [[ -f "${VCF_OUT}.tbi" ]]; then
+                ln -sf "$(realpath "${VCF_OUT}.tbi")" "$OUTPUT_DIR/vcf/"
+            fi
+        done
     fi
 
     if [[ ! -f "$VCF_FILE" ]]; then
@@ -170,16 +240,11 @@ print_success "VCF files linked successfully"
 if [[ "$SKIP_BCF" == false ]]; then
     print_info "Step 2: Converting VCF to BCF format for phasing..."
 
-    for chr in {1..22} X; do
+    for chr in {1..22} X X_nonPAR X_PAR1 X_PAR2; do
         print_info "Converting chromosome $chr to BCF..."
 
         INPUT_VCF="$OUTPUT_DIR/vcf/ALL.chr${chr}.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.vcf.gz"
         OUTPUT_BCF="$OUTPUT_DIR/bcf/ALL.chr${chr}.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.bcf"
-
-        if [[ "$chr" == "X" ]]; then
-            INPUT_VCF="$OUTPUT_DIR/vcf/ALL.chrX.phase3_shapeit2_mvncall_integrated_v1b.20130502.genotypes.vcf.gz"
-            OUTPUT_BCF="$OUTPUT_DIR/bcf/ALL.chrX.phase3_shapeit2_mvncall_integrated_v1b.20130502.genotypes.bcf"
-        fi
 
         if [[ ! -f "$OUTPUT_BCF" ]]; then
             print_info "Converting $INPUT_VCF to BCF..."
@@ -203,54 +268,13 @@ if [[ "$SKIP_MSAV" == false ]]; then
     print_info "Step 3: Converting VCF to msav format for imputation..."
     print_info "This may take a while..."
 
-    for chr in {1..22} X; do
+    for chr in {1..22} X_nonPAR X_PAR1 X_PAR2; do
         print_info "Converting chromosome $chr to msav..."
         INPUT_VCF="$OUTPUT_DIR/vcf/ALL.chr${chr}.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.vcf.gz"
         OUTPUT_MSAV="$OUTPUT_DIR/msav/ALL.chr${chr}.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.msav"
 
-        if [[ "$chr" == "X" ]]; then
-            INPUT_VCF="$OUTPUT_DIR/vcf/ALL.chrX.phase3_shapeit2_mvncall_integrated_v1b.20130502.genotypes.vcf.gz"
-            OUTPUT_MSAV="$OUTPUT_DIR/msav/ALL.chrX_PAR1.phase3_shapeit2_mvncall_integrated_v1b.20130502.genotypes.msav"
-        fi
-
         if [[ ! -f "$OUTPUT_MSAV" ]]; then
-            if [[ "$chr" == "X" ]]; then
-                # PAR1
-                bcftools view -r X:60001-2699520 $INPUT_VCF -Oz -o X_PAR1.vcf.gz
-                tabix -p vcf X_PAR1.vcf.gz
-
-                # nonPAR
-                bcftools view -r X:2699521-154931043 $INPUT_VCF -Oz -o X_nonPAR.vcf.gz
-                tabix -p vcf X_nonPAR.vcf.gz
-
-                # PAR2
-                bcftools view -r X:154931044-155260560 $INPUT_VCF -Oz -o X_PAR2.vcf.gz
-                tabix -p vcf X_PAR2.vcf.gz
-
-                echo "> Checking male ploidy in nonPAR (just to avoid cursed VCF errors)"
-                bcftools +fixploidy X_nonPAR.vcf.gz -- --check || true
-
-                # Optional auto-fix ploidy if needed
-                # Uncomment this block if your data screams
-                #
-                # echo "> Auto-fixing ploidy issues in nonPAR"
-                # bcftools +fixploidy X_nonPAR.vcf.gz -- -f > X_nonPAR.fixed.vcf
-                # bgzip X_nonPAR.fixed.vcf
-                # mv X_nonPAR.fixed.vcf.gz X_nonPAR.vcf.gz
-                # tabix -p vcf X_nonPAR.vcf.gz
-
-                minimac4 --compress-reference X_PAR1.vcf.gz > $OUTPUT_DIR/msav/ALL.chrX_PAR1.phase3_shapeit2_mvncall_integrated_v1b.20130502.genotypes.msav
-                minimac4 --compress-reference X_nonPAR.vcf.gz > $OUTPUT_DIR/msav/ALL.chrX_nonPAR.phase3_shapeit2_mvncall_integrated_v1b.20130502.genotypes.msav
-                minimac4 --compress-reference X_PAR2.vcf.gz > $OUTPUT_DIR/msav/ALL.chrX_PAR2.phase3_shapeit2_mvncall_integrated_v1b.20130502.genotypes.msav
-
-                # Chromosome X has mixed ploidy issues with older minimac4 versions
-                print_info "Skipping chromosome X msav conversion (requires newer minimac4 with --refSex support)"
-                print_info "You can use a pre-built reference panel or upgrade minimac4"
-            else
-                minimac4 --compress-reference "$INPUT_VCF" \
-                         --output "$OUTPUT_MSAV" \
-                         --threads "$THREADS"
-            fi
+            minimac4 --compress-reference "$INPUT_VCF" --output "$OUTPUT_MSAV" --threads "$THREADS"
         else
             print_info "msav for chr$chr already exists, skipping..."
         fi

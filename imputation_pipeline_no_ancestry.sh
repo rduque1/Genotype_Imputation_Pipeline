@@ -66,7 +66,7 @@ Required Arguments:
 Optional Arguments:
   --ref, -r TYPE          Reference panel: HRC or 1KG (default: 1KG)
   --start, -s NUM         First step to run (default: 0)
-  --end, -e NUM           Last step to run (default: 6)
+  --end, -e NUM           Last step to run (default: 5)
   --chr, -c NUM           Process single chromosome only (1-22 or X, default: all)
   --threads, -t NUM       Number of threads to use (default: 8)
   --temp PATH             Custom temporary directory
@@ -81,10 +81,9 @@ Pipeline Steps:
   0. Check VCF genome build version
   1. Lift to GRCh37 (hg19)
   2. Quality control 1: LD-based fixes, strand corrections
-  3. Ancestry analysis and sample splitting
-  4. Quality control 2: missingness and HWE filtering
-  5. Phasing with Eagle
-  6. Imputation with Minimac4
+  3. Quality control 2: missingness and HWE filtering
+  4. Phasing with Eagle
+  5. Imputation with Minimac4
 
 Note: 23andMe format (.txt) is automatically detected and converted to VCF
 
@@ -355,9 +354,13 @@ get_chr_range() {
     if [[ -n "$CHR_ONLY" ]]; then
         echo "$CHR_ONLY"
     else
-        # Default to autosomes + X chromosome (output as space-separated list for iteration)
-        # echo "1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 X"
-        echo "1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22"
+        # Dynamic detection based on input file
+        # If MYINPUT is defined and exists, detect; otherwise default to all
+        if [[ -f "$MYINPUT" ]]; then
+            detect_chromosomes "$MYINPUT"
+        else
+            echo "1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 X"
+        fi
     fi
 }
 
@@ -678,309 +681,74 @@ if [[ $START_FROM -le 2 ]] && [[ $STOP_AFTER -ge 2 ]]; then
 fi
 
 ################################################################################
-# Step 3: Ancestry Analysis
+# Step 3: QC2 (Single Sample Mode - No Ancestry Splitting)
 ################################################################################
 
 if [[ $START_FROM -le 3 ]] && [[ $STOP_AFTER -ge 3 ]]; then
-    print_step "Step 3: Ancestry Analysis and Sample Splitting"
+    print_step "Step 3: Quality Control 2 (Missingness and HWE)"
 
-    STEP3_OUT="${OUTROOT}/3_ancestry"
+    STEP3_OUT="${OUTROOT}/3_QC2"
     mkdir -p "$STEP3_OUT"
 
-    OUTSUBDIR="${PREFIX}"
-    mkdir -p "${STEP3_OUT}/${OUTSUBDIR}"
-    cd "${STEP3_OUT}/${OUTSUBDIR}"
+    cd "$STEP3_OUT"
 
+    # Input is directly from Step 2 (no ancestry splitting)
     MYINPUT_STEP3="${OUTROOT}/2_GH/${PREFIX}.${LIFTED_CODE}.GH"
-    REF_POP="${SCRIPT_DIR}/required_tools/1000G_P3_super_pop.pop"
 
-    # Check number of samples
-    NUM_SAMPLES=$(bcftools query -l "${MYINPUT_STEP3}.chr$(eval echo $(get_chr_range) | awk '{print $1}').vcf.gz" | wc -l)
+    # Set filters (HWE disabled for single samples)
+    HWEFLAG=""
+    if [[ "$HWE_MODE" == "yes" ]]; then
+        print_warning "HWE filtering disabled for single sample processing"
+    fi
 
-    if [[ $NUM_SAMPLES -lt 50 ]]; then
-        print_warning "Only $NUM_SAMPLES sample(s) detected. Skipping LD pruning (requires 50+ samples)."
-        print_info "Copying VCF files without pruning..."
+    GENOFLAG="--geno 0.1"
+    MINDFLAG="--mind 0.05"
 
-        CHR_RANGE=$(get_chr_range)
+    print_info "Applying filters: $GENOFLAG $MINDFLAG"
+
+    # Process each chromosome
+    qc2_chr() {
+        local chr=$1
+
+        # FIX: Always regenerate BED from the VCF to ensure we capture the 'fixref' corrections from Step 2
+        # Previous logic checked 'if [[ ! -f ... ]]' which used the stale/intermediate BED file.
+
+        print_info "Converting corrected VCF to BED for chromosome $chr..."
+        $PLINK2 --vcf "${MYINPUT_STEP3}.chr${chr}.vcf.gz" \
+            --make-bed --id-delim '_' --out "${MYINPUT_STEP3}.chr${chr}"
+
+        # Apply QC filters
+        $PLINK2 --bfile "${MYINPUT_STEP3}.chr${chr}" \
+            --make-bed $GENOFLAG $MINDFLAG \
+            --out "${PREFIX}.${LIFTED_CODE}.GH.QC2.chr${chr}"
+    }
+
+    export -f qc2_chr
+    export -f print_info
+    export PLINK2 PREFIX LIFTED_CODE GENOFLAG MINDFLAG MYINPUT_STEP3
+
+    CHR_RANGE=$(get_chr_range)
+    if command -v parallel &> /dev/null; then
+        parallel -j "$THREADS" qc2_chr ::: $(eval echo $CHR_RANGE)
+    else
         for chr in $(eval echo $CHR_RANGE); do
-            print_info "Processing chromosome $chr..."
-            cp "${MYINPUT_STEP3}.chr${chr}.vcf.gz" "${PREFIX}.${LIFTED_CODE}.GH.chr${chr}.pruned.vcf.gz"
-            tabix -p vcf "${PREFIX}.${LIFTED_CODE}.GH.chr${chr}.pruned.vcf.gz" 2>/dev/null || true
+            qc2_chr "$chr"
         done
-    else
-        print_info "Pruning markers with LD threshold 0.05..."
-
-        # Prune function
-        prune_chr() {
-            local chr=$1
-            print_info "Pruning chromosome $chr..."
-
-            if [[ "$WGS_MODE" == "yes" ]]; then
-                bcftools view -R "${SCRIPT_DIR}/required_tools/chr_pos_23andme.txt" \
-                    "${MYINPUT_STEP3}.chr${chr}.vcf.gz" -Ov -o "${PREFIX}.${LIFTED_CODE}.GH.chr${chr}.23andMe_pos.vcf"
-                $PLINK2 --vcf "${PREFIX}.${LIFTED_CODE}.GH.chr${chr}.23andMe_pos.vcf" \
-                    --indep-pairwise 100 10 0.05 --out "${PREFIX}.${LIFTED_CODE}.GH.chr${chr}"
-            else
-                $PLINK2 --vcf "${MYINPUT_STEP3}.chr${chr}.vcf.gz" \
-                    --indep-pairwise 100 10 0.05 --out "${PREFIX}.${LIFTED_CODE}.GH.chr${chr}"
-            fi
-
-            vcftools --gzvcf "${MYINPUT_STEP3}.chr${chr}.vcf.gz" \
-                --snps "${PREFIX}.${LIFTED_CODE}.GH.chr${chr}.prune.in" \
-                --recode --recode-INFO-all --out "${PREFIX}.${LIFTED_CODE}.GH.chr${chr}.pruned"
-
-            bgzip -c "${PREFIX}.${LIFTED_CODE}.GH.chr${chr}.pruned.recode.vcf" > "${PREFIX}.${LIFTED_CODE}.GH.chr${chr}.pruned.vcf.gz"
-            tabix -p vcf "${PREFIX}.${LIFTED_CODE}.GH.chr${chr}.pruned.vcf.gz"
-            rm "${PREFIX}.${LIFTED_CODE}.GH.chr${chr}.pruned.recode.vcf"
-        }
-
-        export -f prune_chr
-        export -f print_info
-        export PREFIX LIFTED_CODE MYINPUT_STEP3 PLINK2 SCRIPT_DIR WGS_MODE
-
-        CHR_RANGE=$(get_chr_range)
-        if command -v parallel &> /dev/null; then
-            parallel -j "$THREADS" prune_chr ::: $(eval echo $CHR_RANGE)
-        else
-            for chr in $(eval echo $CHR_RANGE); do
-                prune_chr "$chr"
-            done
-        fi
     fi
-
-    print_info "Intersecting with 1000 Genomes reference..."
-
-    # Get reference path from custom or default
-    if [[ -n "$REF_PATH_CUSTOM" ]]; then
-        REF_VCF_PATH="$REF_PATH_CUSTOM"
-    else
-        print_error "Custom reference path is required for ancestry analysis step (--ref-path)"
-        exit 1
-    fi
-
-    # Intersect with reference and MERGE them together (like archived pipeline)
-    CHR_RANGE=$(get_chr_range)
-    FIRST_CHR=$(eval echo $CHR_RANGE | awk '{print $1}')
-
-    for chr in $(eval echo $CHR_RANGE); do
-        print_info "Intersecting chromosome $chr with 1KG reference..."
-        bcftools isec \
-            "${PREFIX}.${LIFTED_CODE}.GH.chr${chr}.pruned.vcf.gz" \
-            "${REF_VCF_PATH}/ALL.chr${chr}.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.vcf.gz" \
-            -p "${PREFIX}.${LIFTED_CODE}.GH.chr${chr}_tmp" -n =2 -w 1,2 -Oz
-
-        # Save reference sample IDs from the first chromosome before cleanup
-        if [[ "$chr" == "$FIRST_CHR" ]]; then
-            print_info "Saving reference sample IDs from chromosome $chr..."
-            bcftools query -l "${PREFIX}.${LIFTED_CODE}.GH.chr${chr}_tmp/0001.vcf.gz" > 0001.txt
-        fi
-
-        # Merge user samples with 1KG reference samples
-        bcftools merge "${PREFIX}.${LIFTED_CODE}.GH.chr${chr}_tmp/0000.vcf.gz" \
-            "${PREFIX}.${LIFTED_CODE}.GH.chr${chr}_tmp/0001.vcf.gz" \
-            -Oz -o "${PREFIX}.${LIFTED_CODE}.GH.chr${chr}.pruned.intersect1KG.vcf.gz"
-
-        tabix -f -p vcf "${PREFIX}.${LIFTED_CODE}.GH.chr${chr}.pruned.intersect1KG.vcf.gz"
-        rm -rf "${PREFIX}.${LIFTED_CODE}.GH.chr${chr}_tmp"
-    done
-
-    print_info "Concatenating all chromosomes..."
-    ls -v "${PREFIX}.${LIFTED_CODE}.GH.chr"*.pruned.intersect1KG.vcf.gz > "${PREFIX}.pruned.intersect1KG.vcflist"
-    bcftools concat -f "${PREFIX}.pruned.intersect1KG.vcflist" -Ov -o "${PREFIX}.${LIFTED_CODE}.GH.pruned.intersect1KG.vcf"
-
-    # Rename 1000G sample IDs to have FID_IID format (required for PLINK id-delim)
-    print_info "Renaming reference sample IDs..."
-    # Reference sample IDs were already saved in 0001.txt during the intersection loop
-    if [[ ! -f "0001.txt" ]]; then
-        print_error "Reference sample IDs file (0001.txt) not found. This should have been created during intersection."
-        exit 1
-    fi
-
-    while read line; do printf "${line}\t${line}_${line}\n"; done < 0001.txt > 0001.rename
-    bcftools reheader "${PREFIX}.${LIFTED_CODE}.GH.pruned.intersect1KG.vcf" -s 0001.rename > "${PREFIX}.${LIFTED_CODE}.GH.pruned.intersect1KG.id-delim.vcf"
-    rm "${PREFIX}.${LIFTED_CODE}.GH.pruned.intersect1KG.vcf"
-
-    print_info "Converting merged intersection to BED format..."
-    $PLINK2 --vcf "${PREFIX}.${LIFTED_CODE}.GH.pruned.intersect1KG.id-delim.vcf" \
-        --make-bed --id-delim '_' --out "${PREFIX}.${LIFTED_CODE}.GH.pruned.intersect1KG"
-    rm "${PREFIX}.${LIFTED_CODE}.GH.pruned.intersect1KG.id-delim.vcf"
-
-    # Count user samples (samples before the 1KG reference samples)
-    NUM_USER_SAMPLES=$(bcftools query -l "${PREFIX}.${LIFTED_CODE}.GH.chr$(eval echo $(get_chr_range) | awk '{print $1}').pruned.vcf.gz" | wc -l | tr -d ' ')
-
-    print_info "Creating population file for ADMIXTURE..."
-    (
-        for i in $(seq 1 $NUM_USER_SAMPLES); do echo "-"; done
-        cat "$REF_POP"
-    ) > "${PREFIX}.${LIFTED_CODE}.GH.pruned.intersect1KG.pop"
-
-    print_info "Running ADMIXTURE with supervised learning..."
-    admixture --supervised "${PREFIX}.${LIFTED_CODE}.GH.pruned.intersect1KG.bed" 5 -j${THREADS}
-
-    print_info "Extracting sample IDs and ancestry results..."
-    # Get subject IDs with ancestry results (both user and reference)
-    cat "${PREFIX}.${LIFTED_CODE}.GH.pruned.intersect1KG.fam" | awk '{print $1 "_" $2}' > "${PREFIX}.${LIFTED_CODE}.GH.pruned.intersect1KG.subjectIDs"
-    paste "${PREFIX}.${LIFTED_CODE}.GH.pruned.intersect1KG.subjectIDs" "${PREFIX}.${LIFTED_CODE}.GH.pruned.intersect1KG.5.Q" | tr '\t' ' ' > "${PREFIX}.${LIFTED_CODE}.GH.pruned.intersect1KG.5.Q.IDs"
-
-    # Get user sample IDs (FID_IID format) from original pruned VCFs
-    bcftools query -l "${PREFIX}.${LIFTED_CODE}.GH.chr$(eval echo $(get_chr_range) | awk '{print $1}').pruned.vcf.gz" | \
-        tr '_' '\t' | awk '{print$1"_"$2"\t"$1"\t"$2}' > "${PREFIX}.${LIFTED_CODE}.GH.pruned.subjectIDs"
-
-    # Create readable version with headers
-    (
-        echo -e "SampleID\tAFR\tAMR\tEAS\tEUR\tSAS"
-        head -n $NUM_USER_SAMPLES "${PREFIX}.${LIFTED_CODE}.GH.pruned.intersect1KG.5.Q.IDs"
-    ) > "${PREFIX}.${LIFTED_CODE}.GH.pruned.intersect1KG.5.Q.readable"
-
-    print_info "Ancestry proportions saved to: ${PREFIX}.${LIFTED_CODE}.GH.pruned.intersect1KG.5.Q.readable"
-    print_info "Splitting samples by ancestry (threshold 0.95)..."
-    Rscript "$SPLIT_BY_ANCESTRY" \
-        "${PREFIX}.${LIFTED_CODE}.GH.pruned.intersect1KG.5.Q.IDs" \
-        "${PREFIX}.${LIFTED_CODE}.GH.pruned.subjectIDs" \
-        0.95
-
-    # Now split the original harmonized genotype files by ancestry
-    print_info "Creating ancestry-specific BED files from original genotypes..."
-
-    # First convert original VCFs to BED format per chromosome
-    for chr in $(eval echo $(get_chr_range)); do
-        if [[ -f "${MYINPUT_STEP3}.chr${chr}.vcf.gz" ]]; then
-            $PLINK2 --vcf "${MYINPUT_STEP3}.chr${chr}.vcf.gz" \
-                --make-bed --id-delim '_' --out "${PREFIX}.${LIFTED_CODE}.GH.chr${chr}"
-        fi
-    done
-
-    # Now split by ancestry using the .ids files
-    CHR_RANGE=$(get_chr_range)
-    for anc in 1 2 3 4 5 mixed; do
-        IDS_FILE="${PREFIX}.${LIFTED_CODE}.GH.pruned.intersect1KG.5.Q.IDs.${anc}.ids"
-
-        if [[ -f "$IDS_FILE" ]]; then
-            print_info "Splitting ancestry group $anc..."
-
-            for chr in $(eval echo $CHR_RANGE); do
-                if [[ -f "${PREFIX}.${LIFTED_CODE}.GH.chr${chr}.bed" ]]; then
-                    $PLINK2 --bfile "${PREFIX}.${LIFTED_CODE}.GH.chr${chr}" \
-                        --keep "$IDS_FILE" \
-                        --make-bed \
-                        --out "${PREFIX}.${LIFTED_CODE}.GH.ancestry-${anc}.chr${chr}"
-                fi
-            done
-        else
-            print_info "No samples found for ancestry group $anc"
-        fi
-    done
-
-    print_info "Ancestry analysis completed"
-fi
-
-################################################################################
-# Step 4: Split and QC2
-################################################################################
-
-if [[ $START_FROM -le 4 ]] && [[ $STOP_AFTER -ge 4 ]]; then
-    print_step "Step 4: Quality Control 2 (Missingness and HWE)"
-
-    STEP4_OUT="${OUTROOT}/4_split_QC2"
-    mkdir -p "$STEP4_OUT"
-
-    OUTSUBDIR="${PREFIX}"
-    mkdir -p "${STEP4_OUT}/${OUTSUBDIR}"
-
-    # Process each ancestry
-    for anc in 1 2 3 4 5 mixed; do
-        print_info "Processing ancestry group: $anc"
-
-        MYINPUT_STEP4="${OUTROOT}/3_ancestry/${OUTSUBDIR}/${PREFIX}.${LIFTED_CODE}.GH.ancestry-${anc}"
-
-        if [[ ! -f "${MYINPUT_STEP4}.chr$(eval echo $(get_chr_range) | awk '{print $1}').bed" ]]; then
-            print_warning "Ancestry group $anc has no files, skipping..."
-            continue
-        fi
-
-        cd "${STEP4_OUT}/${OUTSUBDIR}"
-
-        # Set filters
-        HWEFLAG=""
-        if [[ "$HWE_MODE" == "yes" ]] && [[ "$anc" != "mixed" ]]; then
-            HWEFLAG="--hwe 1e-10"
-        fi
-
-        GENOFLAG="--geno 0.1"
-        MINDFLAG="--mind 0.05"
-
-        print_info "Applying filters: $HWEFLAG $GENOFLAG $MINDFLAG"
-
-        # Process each chromosome
-        qc2_chr() {
-            local chr=$1
-            local anc=$2
-            $PLINK2 --bfile "${MYINPUT_STEP4}.chr${chr}" \
-                --make-bed $HWEFLAG $GENOFLAG $MINDFLAG \
-                --out "${PREFIX}.${LIFTED_CODE}.GH.ancestry-${anc}.chr${chr}.tmp"
-        }
-
-        export -f qc2_chr
-        export PLINK2 PREFIX LIFTED_CODE HWEFLAG GENOFLAG MINDFLAG MYINPUT_STEP4
-
-        CHR_RANGE=$(get_chr_range)
-        if command -v parallel &> /dev/null; then
-            parallel -j "$THREADS" qc2_chr ::: $(eval echo $CHR_RANGE) ::: "$anc"
-        else
-            for chr in $(eval echo $CHR_RANGE); do
-                qc2_chr "$chr" "$anc"
-            done
-        fi
-
-        # Remove samples with missingness issues across all chromosomes
-        cat ${PREFIX}.${LIFTED_CODE}.GH.ancestry-${anc}.chr*.tmp.mindrem > "${PREFIX}.${LIFTED_CODE}.GH.ancestry-${anc}.tmp.mindrem.id" 2>/dev/null || true
-
-        if [[ -s "${PREFIX}.${LIFTED_CODE}.GH.ancestry-${anc}.tmp.mindrem.id" ]]; then
-            print_info "Removing samples that failed missingness checks..."
-            sort -u "${PREFIX}.${LIFTED_CODE}.GH.ancestry-${anc}.tmp.mindrem.id" > "${PREFIX}.${LIFTED_CODE}.GH.ancestry-${anc}.tmp.unique.mindrem.id"
-
-            CHR_RANGE=$(get_chr_range)
-            for chr in $(eval echo $CHR_RANGE); do
-                if [[ -f "${PREFIX}.${LIFTED_CODE}.GH.ancestry-${anc}.chr${chr}.tmp.bed" ]]; then
-                    $PLINK2 --bfile "${PREFIX}.${LIFTED_CODE}.GH.ancestry-${anc}.chr${chr}.tmp" \
-                        --remove "${PREFIX}.${LIFTED_CODE}.GH.ancestry-${anc}.tmp.unique.mindrem.id" \
-                        --make-bed --out "${PREFIX}.${LIFTED_CODE}.GH.ancestry-${anc}.chr${chr}"
-                fi
-            done
-            rm -f ${PREFIX}.${LIFTED_CODE}.GH.ancestry-${anc}.chr*.tmp.*
-        else
-            print_info "No samples failed missingness checks."
-            CHR_RANGE=$(get_chr_range)
-            for chr in $(eval echo $CHR_RANGE); do
-                if [[ -f "${PREFIX}.${LIFTED_CODE}.GH.ancestry-${anc}.chr${chr}.tmp.bed" ]]; then
-                    mv "${PREFIX}.${LIFTED_CODE}.GH.ancestry-${anc}.chr${chr}.tmp.bed" "${PREFIX}.${LIFTED_CODE}.GH.ancestry-${anc}.chr${chr}.bed"
-                    mv "${PREFIX}.${LIFTED_CODE}.GH.ancestry-${anc}.chr${chr}.tmp.bim" "${PREFIX}.${LIFTED_CODE}.GH.ancestry-${anc}.chr${chr}.bim"
-                    mv "${PREFIX}.${LIFTED_CODE}.GH.ancestry-${anc}.chr${chr}.tmp.fam" "${PREFIX}.${LIFTED_CODE}.GH.ancestry-${anc}.chr${chr}.fam"
-                fi
-            done
-        fi
-        # Clean up intermediate files
-        rm -f ${PREFIX}.${LIFTED_CODE}.GH.ancestry-${anc}.tmp.*.id
-
-
-    done
 
     print_info "QC2 completed"
 fi
 
 ################################################################################
-# Step 5: Phasing
+# Step 4: Phasing (Single Sample Mode)
 ################################################################################
 
-if [[ $START_FROM -le 5 ]] && [[ $STOP_AFTER -ge 5 ]]; then
-    print_step "Step 5: Phasing with Eagle"
+if [[ $START_FROM -le 4 ]] && [[ $STOP_AFTER -ge 4 ]]; then
+    print_step "Step 4: Phasing with Eagle"
 
-    STEP5_OUT="${OUTROOT}/5_phase"
-    mkdir -p "$STEP5_OUT"
-
-    OUTSUBDIR="${PREFIX}"
-    mkdir -p "${STEP5_OUT}/${OUTSUBDIR}"
-    cd "${STEP5_OUT}/${OUTSUBDIR}"
+    STEP4_OUT="${OUTROOT}/4_phase"
+    mkdir -p "$STEP4_OUT"
+    cd "$STEP4_OUT"
 
     MYMAP="${SCRIPT_DIR}/required_tools/Eagle_v2.4.1/tables/genetic_map_hg19_withX.txt.gz"
 
@@ -989,27 +757,27 @@ if [[ $START_FROM -le 5 ]] && [[ $STOP_AFTER -ge 5 ]]; then
         REF_BASE="$REF_BCF_CUSTOM"
         print_info "Using custom BCF reference path: $REF_BASE"
     else
-        print_error "Custom BCF reference path is required for phasing step (--ref-bcf-path)"
+        print_error "Custom BCF reference path is required for phasing step (--ref-bcf)"
         exit 1
     fi
 
-    # Phase each ancestry and chromosome
+    # Phase each chromosome
     phase_chr() {
         local chr=$1
-        local anc=$2
 
-        MYINPUT_STEP5="${OUTROOT}/4_split_QC2/${PREFIX}/${PREFIX}.${LIFTED_CODE}.GH.ancestry-${anc}.chr${chr}"
+        MYINPUT_STEP4="${OUTROOT}/3_QC2/${PREFIX}.${LIFTED_CODE}.GH.QC2.chr${chr}"
 
-        if [[ ! -f "${MYINPUT_STEP5}.bed" ]]; then
+        if [[ ! -f "${MYINPUT_STEP4}.bed" ]]; then
+            print_warning "No BED file found for chromosome $chr, skipping..."
             return
         fi
 
-        INPREFIX=$(basename "$MYINPUT_STEP5")
+        INPREFIX="${PREFIX}.${LIFTED_CODE}.GH.QC2.chr${chr}"
 
-        print_info "Phasing ancestry $anc, chromosome $chr..."
+        print_info "Phasing chromosome $chr..."
 
         # Convert to VCF
-        $PLINK2 --bfile "$MYINPUT_STEP5" --export vcf-4.2 bgz \
+        $PLINK2 --bfile "$MYINPUT_STEP4" --export vcf-4.2 bgz \
             --set-missing-var-ids @:#:\$1:\$2 --out "$INPREFIX"
 
         tabix -f -p vcf "${INPREFIX}.vcf.gz"
@@ -1036,141 +804,129 @@ if [[ $START_FROM -le 5 ]] && [[ $STOP_AFTER -ge 5 ]]; then
 
     export -f phase_chr
     export -f print_info
-    export PLINK2 EAGLE PREFIX LIFTED_CODE OUTROOT REF_MODE REF_BASE MYMAP SCRIPT_DIR THREADS
+    export -f print_warning
+    export PLINK2 EAGLE PREFIX LIFTED_CODE OUTROOT REF_BASE MYMAP SCRIPT_DIR THREADS
 
-    # Process all ancestry groups and chromosomes
-    for anc in 1 2 3 4 5 mixed; do
-        print_info "Phasing ancestry group: $anc"
-
-        CHR_RANGE=$(get_chr_range)
-        if command -v parallel &> /dev/null; then
-            parallel -j $(($THREADS / 4)) phase_chr ::: $(eval echo $CHR_RANGE) ::: "$anc"
-        else
-            for chr in $(eval echo $CHR_RANGE); do
-                phase_chr "$chr" "$anc"
-            done
-        fi
-    done
+    CHR_RANGE=$(get_chr_range)
+    if command -v parallel &> /dev/null; then
+        # Ensure at least 1 job is run (integer division 1/4 = 0)
+        N_JOBS=$(($THREADS / 4))
+        if [[ $N_JOBS -lt 1 ]]; then N_JOBS=1; fi
+        parallel -j $N_JOBS phase_chr ::: $(eval echo $CHR_RANGE)
+    else
+        for chr in $(eval echo $CHR_RANGE); do
+            phase_chr "$chr"
+        done
+    fi
 
     print_info "Phasing completed"
 fi
 
 ################################################################################
-# Step 6: Imputation
+# Step 5: Imputation (Single Sample Mode)
 ################################################################################
 
-if [[ $START_FROM -le 6 ]] && [[ $STOP_AFTER -ge 6 ]]; then
-    print_step "Step 6: Imputation with Minimac4"
+if [[ $START_FROM -le 5 ]] && [[ $STOP_AFTER -ge 5 ]]; then
+    print_step "Step 5: Imputation with Minimac4"
 
-    STEP6_OUT="${OUTROOT}/6_impute_${REF_MODE}"
-    mkdir -p "$STEP6_OUT"
+    STEP5_OUT="${OUTROOT}/5_impute"
+    mkdir -p "$STEP5_OUT"
+    cd "$STEP5_OUT"
 
     # Set reference - use custom MSAV path if provided
     if [[ -n "$REF_MSAV_CUSTOM" ]]; then
         REF_BASE="$REF_MSAV_CUSTOM"
         print_info "Using custom MSAV reference path: $REF_BASE"
     else
-        print_error "Custom MSAV reference path is required for imputation step (--ref-msav-path)"
+        print_error "Custom MSAV reference path is required for imputation step (--ref-msav)"
         exit 1
     fi
 
-    # Impute each ancestry and chromosome
+    # Impute each chromosome
     impute_chr() {
         local chr=$1
-        local anc=$2
 
-        MYINPUT_STEP6="${OUTROOT}/5_phase/${PREFIX}/${PREFIX}.${LIFTED_CODE}.GH.ancestry-${anc}.chr${chr}.phased.vcf.gz"
+        MYINPUT_STEP5="${OUTROOT}/4_phase/${PREFIX}.${LIFTED_CODE}.GH.QC2.chr${chr}.phased.vcf.gz"
 
-        if [[ ! -f "$MYINPUT_STEP6" ]]; then # No phased file for this ancestry/chromosome
+        if [[ ! -f "$MYINPUT_STEP5" ]]; then
+            print_warning "No phased file found for chromosome $chr, skipping..."
             return
         fi
 
-        OUTSUBDIR="${PREFIX}/${anc}"
-        mkdir -p "${STEP6_OUT}/${OUTSUBDIR}"
-        cd "${STEP6_OUT}/${OUTSUBDIR}"
-
-        print_info "Imputing ancestry $anc, chromosome $chr..."
+        print_info "Imputing chromosome $chr..."
 
         # Set reference file (handle X chromosome)
         if [[ "$chr" == "X" ]]; then
-            for j in {PAR1,PAR2,nonPAR}; do
+            for j in PAR1 PAR2 nonPAR; do
                 MYREF="${REF_BASE}/ALL.chrX_${j}.phase3_shapeit2_mvncall_integrated_v1b.20130502.genotypes.msav"
                 # Run Minimac4
-                minimac4 "$MYREF" "$MYINPUT_STEP6" \
-                    --output "imputed_${chr}_${j}.dose.vcf.gz" \
+                minimac4 "$MYREF" "$MYINPUT_STEP5" \
+                    --output "${PREFIX}.imputed.chr${chr}_${j}.dose.vcf.gz" \
                     --output-format vcf.gz \
                     --min-ratio 0.001 --chunk 30000000 --overlap 3000000 --threads "$THREADS"
             done
         else
             MYREF="${REF_BASE}/ALL.chr${chr}.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.msav"
             # Run Minimac4
-            minimac4 "$MYREF" "$MYINPUT_STEP6" \
-                --output "imputed_${chr}.dose.vcf.gz" \
+            minimac4 "$MYREF" "$MYINPUT_STEP5" \
+                --output "${PREFIX}.imputed.chr${chr}.dose.vcf.gz" \
                 --output-format vcf.gz \
                 --min-ratio 0.001 --chunk 30000000 --overlap 3000000 --threads "$THREADS"
         fi
-
-        # Sort the file before indexing, as minimac4 output may not be sorted.
-        # bcftools sort "imputed_${chr}.dose.vcf.gz" -Oz -o "imputed_${chr}.dose.sorted.vcf.gz"
-        # mv "imputed_${chr}.dose.sorted.vcf.gz" "imputed_${chr}.dose.vcf.gz"
-        # tabix -p vcf "imputed_${chr}.dose.vcf.gz"
     }
 
     export -f impute_chr
     export -f print_info
-    export PREFIX LIFTED_CODE OUTROOT REF_MODE REF_BASE STEP6_OUT THREADS
+    export -f print_warning
+    export PREFIX LIFTED_CODE OUTROOT REF_BASE THREADS
 
-    # Process all ancestry groups and chromosomes
-    for anc in 1 2 3 4 5 mixed; do
-        print_info "Imputing ancestry group: $anc"
-
-        CHR_RANGE=$(get_chr_range)
-        # if command -v parallel &> /dev/null; then
-        #     parallel -j $(($THREADS / 4)) impute_chr ::: $(eval echo $CHR_RANGE) ::: "$anc"
-        # else
-        for chr in $(eval echo $CHR_RANGE); do
-            impute_chr "$chr" "$anc"
-        done
-        # fi
+    CHR_RANGE=$(get_chr_range)
+    for chr in $(eval echo $CHR_RANGE); do
+        impute_chr "$chr"
     done
 
     print_info "Imputation completed"
 fi
 
 ################################################################################
-# Step 7: Convert VCF to GEN format
+# Complete
 ################################################################################
 
-if [[ $START_FROM -le 7 ]] && [[ $STOP_AFTER -ge 7 ]]; then
+print_step "Pipeline Complete!"
+
+if false; then  # Optional steps disabled by default
+
+################################################################################
+# Optional: Convert VCF to GEN format (Single Sample Mode)
+################################################################################
+
+if [[ $START_FROM -le 6 ]] && [[ $STOP_AFTER -ge 6 ]]; then
     print_step "Step 7: Converting VCF to GEN format with genotype probabilities"
 
     STEP7_OUT="${OUTROOT}/7_gen_format"
     mkdir -p "$STEP7_OUT"
+    cd "$STEP7_OUT"
 
-    STEP6_OUT="${OUTROOT}/6_impute_${REF_MODE}"
+    STEP6_OUT="${OUTROOT}/6_impute"
 
-    # Convert each ancestry and chromosome
+    # Convert each chromosome
     convert_to_gen() {
         local chr=$1
-        local anc=$2
-
-        OUTSUBDIR="${PREFIX}/${anc}"
-        mkdir -p "${STEP7_OUT}/${OUTSUBDIR}"
 
         # Handle X chromosome with PAR regions
         if [[ "$chr" == "X" ]]; then
-            print_info "Converting ancestry $anc, chromosome X (merging PAR1, PAR2, and nonPAR) to GEN format..."
+            print_info "Converting chromosome X (merging PAR1, PAR2, and nonPAR) to GEN format..."
 
             # Convert each region to GEN format
             for j in PAR1 PAR2 nonPAR; do
-                VCF_INPUT="${STEP6_OUT}/${OUTSUBDIR}/imputed_${chr}_${j}.dose.vcf.gz"
+                VCF_INPUT="${STEP6_OUT}/${PREFIX}.imputed.chr${chr}_${j}.dose.vcf.gz"
 
                 if [[ ! -f "$VCF_INPUT" ]]; then
                     print_warning "Missing ${chr}_${j} VCF file, skipping..."
                     continue
                 fi
 
-                GEN_OUTPUT_TEMP="${STEP7_OUT}/${OUTSUBDIR}/imputed_${chr}_${j}.temp"
+                GEN_OUTPUT_TEMP="${STEP7_OUT}/${PREFIX}.imputed.chr${chr}_${j}.temp"
 
                 # Convert to GEN format
                 bcftools convert "$VCF_INPUT" \
@@ -1179,40 +935,40 @@ if [[ $START_FROM -le 7 ]] && [[ $STOP_AFTER -ge 7 ]]; then
             done
 
             # Merge the three regions into one file (in genomic order: PAR1, nonPAR, PAR2)
-            GEN_OUTPUT="${STEP7_OUT}/${OUTSUBDIR}/imputed_${chr}"
+            GEN_OUTPUT="${STEP6_GEN_OUT}/${PREFIX}.imputed.chr${chr}"
 
             # Check which files exist
             PAR1_EXISTS=false
             NONPAR_EXISTS=false
             PAR2_EXISTS=false
 
-            [[ -f "${STEP7_OUT}/${OUTSUBDIR}/imputed_${chr}_PAR1.temp.gen" ]] && PAR1_EXISTS=true
-            [[ -f "${STEP7_OUT}/${OUTSUBDIR}/imputed_${chr}_nonPAR.temp.gen" ]] && NONPAR_EXISTS=true
-            [[ -f "${STEP7_OUT}/${OUTSUBDIR}/imputed_${chr}_PAR2.temp.gen" ]] && PAR2_EXISTS=true
+            [[ -f "${STEP6_GEN_OUT}/${PREFIX}.imputed.chr${chr}_PAR1.temp.gen" ]] && PAR1_EXISTS=true
+            [[ -f "${STEP6_GEN_OUT}/${PREFIX}.imputed.chr${chr}_nonPAR.temp.gen" ]] && NONPAR_EXISTS=true
+            [[ -f "${STEP6_GEN_OUT}/${PREFIX}.imputed.chr${chr}_PAR2.temp.gen" ]] && PAR2_EXISTS=true
 
             # Concatenate GEN files in order (PAR1 -> nonPAR -> PAR2)
             > "${GEN_OUTPUT}.gen"  # Create empty file
 
             if $PAR1_EXISTS; then
-                cat "${STEP7_OUT}/${OUTSUBDIR}/imputed_${chr}_PAR1.temp.gen" >> "${GEN_OUTPUT}.gen"
-                rm "${STEP7_OUT}/${OUTSUBDIR}/imputed_${chr}_PAR1.temp.gen"
+                cat "${STEP6_GEN_OUT}/${PREFIX}.imputed.chr${chr}_PAR1.temp.gen" >> "${GEN_OUTPUT}.gen"
+                rm "${STEP6_GEN_OUT}/${PREFIX}.imputed.chr${chr}_PAR1.temp.gen"
             fi
 
             if $NONPAR_EXISTS; then
-                cat "${STEP7_OUT}/${OUTSUBDIR}/imputed_${chr}_nonPAR.temp.gen" >> "${GEN_OUTPUT}.gen"
-                rm "${STEP7_OUT}/${OUTSUBDIR}/imputed_${chr}_nonPAR.temp.gen"
+                cat "${STEP6_GEN_OUT}/${PREFIX}.imputed.chr${chr}_nonPAR.temp.gen" >> "${GEN_OUTPUT}.gen"
+                rm "${STEP6_GEN_OUT}/${PREFIX}.imputed.chr${chr}_nonPAR.temp.gen"
             fi
 
             if $PAR2_EXISTS; then
-                cat "${STEP7_OUT}/${OUTSUBDIR}/imputed_${chr}_PAR2.temp.gen" >> "${GEN_OUTPUT}.gen"
-                rm "${STEP7_OUT}/${OUTSUBDIR}/imputed_${chr}_PAR2.temp.gen"
+                cat "${STEP6_GEN_OUT}/${PREFIX}.imputed.chr${chr}_PAR2.temp.gen" >> "${GEN_OUTPUT}.gen"
+                rm "${STEP6_GEN_OUT}/${PREFIX}.imputed.chr${chr}_PAR2.temp.gen"
             fi
 
             # Copy the sample file (they should all be identical, so just use the first one found)
             for j in PAR1 nonPAR PAR2; do
-                if [[ -f "${STEP7_OUT}/${OUTSUBDIR}/imputed_${chr}_${j}.temp.sample" ]]; then
-                    cp "${STEP7_OUT}/${OUTSUBDIR}/imputed_${chr}_${j}.temp.sample" "${GEN_OUTPUT}.sample"
-                    rm "${STEP7_OUT}/${OUTSUBDIR}/imputed_${chr}_${j}.temp.sample"
+                if [[ -f "${STEP6_GEN_OUT}/${PREFIX}.imputed.chr${chr}_${j}.temp.sample" ]]; then
+                    cp "${STEP6_GEN_OUT}/${PREFIX}.imputed.chr${chr}_${j}.temp.sample" "${GEN_OUTPUT}.sample"
+                    rm "${STEP6_GEN_OUT}/${PREFIX}.imputed.chr${chr}_${j}.temp.sample"
                     break
                 fi
             done
@@ -1222,15 +978,16 @@ if [[ $START_FROM -le 7 ]] && [[ $STOP_AFTER -ge 7 ]]; then
 
             print_success "Converted chromosome X (merged PAR regions) to GEN format"
         else
-            VCF_INPUT="${STEP6_OUT}/${OUTSUBDIR}/imputed_${chr}.dose.vcf.gz"
+            VCF_INPUT="${STEP5_OUT}/${PREFIX}.imputed.chr${chr}.dose.vcf.gz"
 
             if [[ ! -f "$VCF_INPUT" ]]; then
+                print_warning "No imputed VCF for chromosome $chr, skipping..."
                 return
             fi
 
-            print_info "Converting ancestry $anc, chromosome $chr to GEN format..."
+            print_info "Converting chromosome $chr to GEN format..."
 
-            GEN_OUTPUT="${STEP7_OUT}/${OUTSUBDIR}/imputed_${chr}"
+            GEN_OUTPUT="${STEP6_GEN_OUT}/${PREFIX}.imputed.chr${chr}"
 
             # Use bcftools to convert VCF to GEN format with genotype probabilities
             bcftools convert "$VCF_INPUT" \
@@ -1248,116 +1005,76 @@ if [[ $START_FROM -le 7 ]] && [[ $STOP_AFTER -ge 7 ]]; then
     export -f print_info
     export -f print_success
     export -f print_warning
-    export PREFIX OUTROOT STEP6_OUT STEP7_OUT REF_MODE
+    export PREFIX STEP5_OUT STEP6_GEN_OUT
 
-    # Process all ancestry groups and chromosomes
-    for anc in 1 2 3 4 5 mixed; do
-        print_info "Converting ancestry group: $anc"
-
-        CHR_RANGE=$(get_chr_range)
-        for chr in $(eval echo $CHR_RANGE); do
-            convert_to_gen "$chr" "$anc"
-        done
+    CHR_RANGE=$(get_chr_range)
+    for chr in $(eval echo $CHR_RANGE); do
+        convert_to_gen "$chr"
     done
 
     print_info "GEN format conversion completed"
 fi
 
 ################################################################################
-# Step 8: Create ZIP archives
+# Optional: Create ZIP archives (Single Sample Mode)
 ################################################################################
 
-if [[ $START_FROM -le 8 ]] && [[ $STOP_AFTER -ge 8 ]]; then
-    print_step "Step 8: Creating ZIP archives of results"
+if [[ $START_FROM -le 7 ]] && [[ $STOP_AFTER -ge 7 ]]; then
+    print_step "Optional: Creating ZIP archives of results"
 
-    STEP8_OUT="${OUTROOT}/8_archives"
-    mkdir -p "$STEP8_OUT"
+    STEP7_OUT="${OUTROOT}/7_archives"
+    mkdir -p "$STEP7_OUT"
 
-    STEP6_OUT="${OUTROOT}/6_impute_${REF_MODE}"
-    STEP7_OUT="${OUTROOT}/7_gen_format"
+    STEP5_OUT="${OUTROOT}/5_impute"
+    STEP6_GEN_OUT="${OUTROOT}/6_gen_format"
 
-    # Process each ancestry group
-    for anc in 1 2 3 4 5 mixed; do
-        OUTSUBDIR="${PREFIX}/${anc}"
+    # Create VCF archive
+    if [[ -d "${STEP6_OUT}" ]]; then
+        VCF_FILES=$(find "${STEP6_OUT}" -name "*.vcf.gz" 2>/dev/null)
 
-        # Check if this ancestry group has data
-        if [[ ! -d "${STEP6_OUT}/${OUTSUBDIR}" ]] && [[ ! -d "${STEP7_OUT}/${OUTSUBDIR}" ]]; then
-            print_info "No data for ancestry group $anc, skipping..."
-            continue
+        if [[ -n "$VCF_FILES" ]]; then
+            print_info "Archiving VCF files..."
+            cd "${STEP6_OUT}"
+            zip -r "${STEP8_OUT}/${PREFIX}_imputed_vcf.zip" *.vcf.gz *.vcf.gz.tbi 2>/dev/null || \
+                zip -r "${STEP8_OUT}/${PREFIX}_imputed_vcf.zip" *.vcf.gz
+            cd - > /dev/null
+            print_success "VCF archive created: ${PREFIX}_imputed_vcf.zip"
+        else
+            print_warning "No VCF files found"
         fi
-
-        print_info "Creating archives for ancestry group: $anc"
-
-        # Create VCF archive
-        if [[ -d "${STEP6_OUT}/${OUTSUBDIR}" ]]; then
-            VCF_FILES=$(find "${STEP6_OUT}/${OUTSUBDIR}" -name "*.vcf.gz" 2>/dev/null)
-
-            if [[ -n "$VCF_FILES" ]]; then
-                print_info "Archiving VCF files for ancestry $anc..."
-                cd "${STEP6_OUT}/${OUTSUBDIR}"
-                zip -r "${STEP8_OUT}/${PREFIX}_ancestry-${anc}_imputed_vcf.zip" *.vcf.gz *.vcf.gz.tbi 2>/dev/null || \
-                    zip -r "${STEP8_OUT}/${PREFIX}_ancestry-${anc}_imputed_vcf.zip" *.vcf.gz
-                cd - > /dev/null
-                print_success "VCF archive created: ${PREFIX}_ancestry-${anc}_imputed_vcf.zip"
-            else
-                print_warning "No VCF files found for ancestry $anc"
-            fi
-        fi
-
-        # Create GEN archive
-        if [[ -d "${STEP7_OUT}/${OUTSUBDIR}" ]]; then
-            GEN_FILES=$(find "${STEP7_OUT}/${OUTSUBDIR}" -name "*.gen.gz" 2>/dev/null)
-
-            if [[ -n "$GEN_FILES" ]]; then
-                print_info "Archiving GEN files for ancestry $anc..."
-                cd "${STEP7_OUT}/${OUTSUBDIR}"
-                zip -r "${STEP8_OUT}/${PREFIX}_ancestry-${anc}_imputed_gen.zip" *.gen.gz *.sample 2>/dev/null || \
-                    zip -r "${STEP8_OUT}/${PREFIX}_ancestry-${anc}_imputed_gen.zip" *.gen.gz
-                cd - > /dev/null
-                print_success "GEN archive created: ${PREFIX}_ancestry-${anc}_imputed_gen.zip"
-            else
-                print_warning "No GEN files found for ancestry $anc"
-            fi
-        fi
-    done
-
-    # Create a master archive with all ancestry groups (optional)
-    print_info "Creating master archives..."
-
-    cd "$STEP8_OUT"
-    if ls ${PREFIX}_ancestry-*_imputed_vcf.zip 1> /dev/null 2>&1; then
-        zip "${PREFIX}_all_ancestries_vcf.zip" ${PREFIX}_ancestry-*_imputed_vcf.zip
-        print_success "Master VCF archive created: ${PREFIX}_all_ancestries_vcf.zip"
     fi
 
-    if ls ${PREFIX}_ancestry-*_imputed_gen.zip 1> /dev/null 2>&1; then
-        zip "${PREFIX}_all_ancestries_gen.zip" ${PREFIX}_ancestry-*_imputed_gen.zip
-        print_success "Master GEN archive created: ${PREFIX}_all_ancestries_gen.zip"
+    # Create GEN archive
+    if [[ -d "${STEP6_GEN_OUT}" ]]; then
+        GEN_FILES=$(find "${STEP6_GEN_OUT}" -name "*.gen.gz" 2>/dev/null)
+
+        if [[ -n "$GEN_FILES" ]]; then
+            print_info "Archiving GEN files..."
+            cd "${STEP6_GEN_OUT}"
+            zip -r "${STEP7_OUT}/${PREFIX}_imputed_gen.zip" *.gen.gz *.sample 2>/dev/null || \
+                zip -r "${STEP7_OUT}/${PREFIX}_imputed_gen.zip" *.gen.gz
+            cd - > /dev/null
+            print_success "GEN archive created: ${PREFIX}_imputed_gen.zip"
+        else
+            print_warning "No GEN files found"
+        fi
     fi
-    cd - > /dev/null
 
     print_info "Archive creation completed"
-    print_info "Archives saved to: $STEP8_OUT"
+    print_info "Archives saved to: $STEP7_OUT"
 fi
 
-################################################################################
-# Complete
-################################################################################
-
-print_step "Pipeline Complete!"
+fi  # End optional steps
 
 print_info "All steps completed successfully"
 print_info "Results are in: $OUTROOT"
 print_info ""
-print_info "Output structure:"
+print_info "Output structure (single sample mode - no ancestry splitting):"
 print_info "  0_check_vcf_build/ - Genome build detection"
 print_info "  1_lift/            - Lifted to GRCh37"
 print_info "  2_GH/              - Harmonized genotypes"
-print_info "  3_ancestry/        - Ancestry analysis results"
-print_info "  4_split_QC2/       - QC filtered data"
-print_info "  5_phase/           - Phased haplotypes"
-print_info "  6_impute_${REF_MODE}/   - Final imputed genotypes (VCF)"
-print_info "  7_gen_format/      - Imputed genotypes in GEN format"
-print_info "  8_archives/        - ZIP archives of results"
+print_info "  3_QC2/             - QC filtered data"
+print_info "  4_phase/           - Phased haplotypes"
+print_info "  5_impute/          - Final imputed genotypes (VCF)"
 
 echo
