@@ -66,7 +66,7 @@ Required Arguments:
 Optional Arguments:
   --ref, -r TYPE          Reference panel: HRC or 1KG (default: 1KG)
   --start, -s NUM         First step to run (default: 0)
-  --end, -e NUM           Last step to run (default: 5)
+  --end, -e NUM           Last step to run (default: 7)
   --chr, -c NUM           Process single chromosome only (1-22 or X, default: all)
   --threads, -t NUM       Number of threads to use (default: 8)
   --temp PATH             Custom temporary directory
@@ -84,6 +84,8 @@ Pipeline Steps:
   3. Quality control 2: missingness and HWE filtering
   4. Phasing with Eagle
   5. Imputation with Minimac4
+  6. Convert VCF to GEN format
+  7. Create ZIP archives
 
 Note: 23andMe format (.txt) is automatically detected and converted to VCF
 
@@ -105,7 +107,7 @@ MYINPUT=""
 OUTROOT=""
 REF_MODE="1KG"
 START_FROM=0
-STOP_AFTER=8
+STOP_AFTER=7
 CHR_ONLY=""
 THREADS=8
 TEMPDIR=""
@@ -889,25 +891,17 @@ if [[ $START_FROM -le 5 ]] && [[ $STOP_AFTER -ge 5 ]]; then
 fi
 
 ################################################################################
-# Complete
-################################################################################
-
-print_step "Pipeline Complete!"
-
-if false; then  # Optional steps disabled by default
-
-################################################################################
-# Optional: Convert VCF to GEN format (Single Sample Mode)
+# Step 6: Convert VCF to GEN format (Single Sample Mode)
 ################################################################################
 
 if [[ $START_FROM -le 6 ]] && [[ $STOP_AFTER -ge 6 ]]; then
-    print_step "Step 7: Converting VCF to GEN format with genotype probabilities"
+    print_step "Step 6: Converting VCF to GEN format with genotype probabilities"
 
-    STEP7_OUT="${OUTROOT}/7_gen_format"
-    mkdir -p "$STEP7_OUT"
-    cd "$STEP7_OUT"
+    STEP6_GEN_OUT="${OUTROOT}/6_gen_format"
+    mkdir -p "$STEP6_GEN_OUT"
+    cd "$STEP6_GEN_OUT"
 
-    STEP6_OUT="${OUTROOT}/6_impute"
+    STEP5_OUT="${OUTROOT}/5_impute"
 
     # Convert each chromosome
     convert_to_gen() {
@@ -919,14 +913,14 @@ if [[ $START_FROM -le 6 ]] && [[ $STOP_AFTER -ge 6 ]]; then
 
             # Convert each region to GEN format
             for j in PAR1 PAR2 nonPAR; do
-                VCF_INPUT="${STEP6_OUT}/${PREFIX}.imputed.chr${chr}_${j}.dose.vcf.gz"
+                VCF_INPUT="${STEP5_OUT}/${PREFIX}.imputed.chr${chr}_${j}.dose.vcf.gz"
 
                 if [[ ! -f "$VCF_INPUT" ]]; then
                     print_warning "Missing ${chr}_${j} VCF file, skipping..."
                     continue
                 fi
 
-                GEN_OUTPUT_TEMP="${STEP7_OUT}/${PREFIX}.imputed.chr${chr}_${j}.temp"
+                GEN_OUTPUT_TEMP="${STEP6_GEN_OUT}/${PREFIX}.imputed.chr${chr}_${j}.temp"
 
                 # Convert to GEN format
                 bcftools convert "$VCF_INPUT" \
@@ -1016,11 +1010,11 @@ if [[ $START_FROM -le 6 ]] && [[ $STOP_AFTER -ge 6 ]]; then
 fi
 
 ################################################################################
-# Optional: Create ZIP archives (Single Sample Mode)
+# Step 7: Create ZIP archives (Single Sample Mode)
 ################################################################################
 
 if [[ $START_FROM -le 7 ]] && [[ $STOP_AFTER -ge 7 ]]; then
-    print_step "Optional: Creating ZIP archives of results"
+    print_step "Step 7: Creating ZIP archives of results"
 
     STEP7_OUT="${OUTROOT}/7_archives"
     mkdir -p "$STEP7_OUT"
@@ -1029,14 +1023,14 @@ if [[ $START_FROM -le 7 ]] && [[ $STOP_AFTER -ge 7 ]]; then
     STEP6_GEN_OUT="${OUTROOT}/6_gen_format"
 
     # Create VCF archive
-    if [[ -d "${STEP6_OUT}" ]]; then
-        VCF_FILES=$(find "${STEP6_OUT}" -name "*.vcf.gz" 2>/dev/null)
+    if [[ -d "${STEP5_OUT}" ]]; then
+        VCF_FILES=$(find "${STEP5_OUT}" -name "*.vcf.gz" 2>/dev/null)
 
         if [[ -n "$VCF_FILES" ]]; then
             print_info "Archiving VCF files..."
-            cd "${STEP6_OUT}"
-            zip -r "${STEP8_OUT}/${PREFIX}_imputed_vcf.zip" *.vcf.gz *.vcf.gz.tbi 2>/dev/null || \
-                zip -r "${STEP8_OUT}/${PREFIX}_imputed_vcf.zip" *.vcf.gz
+            cd "${STEP5_OUT}"
+            zip -r "${STEP7_OUT}/${PREFIX}_imputed_vcf.zip" *.vcf.gz *.vcf.gz.tbi 2>/dev/null || \
+                zip -r "${STEP7_OUT}/${PREFIX}_imputed_vcf.zip" *.vcf.gz
             cd - > /dev/null
             print_success "VCF archive created: ${PREFIX}_imputed_vcf.zip"
         else
@@ -1064,7 +1058,11 @@ if [[ $START_FROM -le 7 ]] && [[ $STOP_AFTER -ge 7 ]]; then
     print_info "Archives saved to: $STEP7_OUT"
 fi
 
-fi  # End optional steps
+################################################################################
+# Complete
+################################################################################
+
+print_step "Pipeline Complete!"
 
 print_info "All steps completed successfully"
 print_info "Results are in: $OUTROOT"
@@ -1076,5 +1074,7 @@ print_info "  2_GH/              - Harmonized genotypes"
 print_info "  3_QC2/             - QC filtered data"
 print_info "  4_phase/           - Phased haplotypes"
 print_info "  5_impute/          - Final imputed genotypes (VCF)"
+print_info "  6_gen_format/      - GEN format files"
+print_info "  7_archives/        - ZIP archives"
 
 echo
