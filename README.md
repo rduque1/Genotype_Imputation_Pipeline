@@ -173,14 +173,6 @@ output/
 
 **Ancestry codes**: 1=AFR, 2=AMR, 3=EAS, 4=EUR, 5=SAS, mixed=Admixed
 
-## Without Docker
-
-Install dependencies: bcftools, samtools, vcftools, tabix, PLINK v1.9/2.0, R, Java 11+, Python 3, then:
-
-```bash
-./imputation_pipeline.sh --vcf input.vcf.gz --out output --ref 1KG --threads 16
-```
-
 ## Troubleshooting
 
 - **Threading errors in Docker**: Use `--privileged` flag (required for bcftools/minimac4)
@@ -188,10 +180,44 @@ Install dependencies: bcftools, samtools, vcftools, tabix, PLINK v1.9/2.0, R, Ja
 - **Reference not found**: Prepare reference panel first (see Quick Start step 2)
 - **X chromosome missing**: Ensure reference panel includes chrX files (see step 2)
 
-
-
 ## Examples
 
 ```bash
  bash imputation_pipeline.sh --vcf id_600.input_data.zip --out /output_dir --threads 1 --ref-path /vcf_ref --ref-bcf /reference_prepared/bcf --ref-m3vcf /reference_prepared/m3vcf --chr 2
+```
+
+```bash
+docker run --privileged -it --rm -v $PWD:/output_dir -v $PWD:/input_data/ -v $PWD/../1000GRef:/vcf_ref -v $PWD/../1000G_prepared:/reference_prepared imputation-pipeline:latest bash
+```
+
+### Run directly from the command line with Docker
+
+```bash
+export OUTDIR=output_$(date +%Y%m%d_%H%M%S) && mkdir -p $OUTDIR && docker run --rm --privileged -v $PWD/new_imp/input_test_data:/input_data -v $PWD/$OUTDIR:/output_dir -v $PWD/new_imp/1000GRef:/vcf_ref -v $PWD/new_imp/1000G_prepared:/reference_prepared --memory=32g --cpus=16 imputation-pipeline:latest bash imputation_pipeline.sh --vcf /input_data/id_600.input_data.zip --out /output_dir --ref-path /vcf_ref --ref-bcf /reference_prepared/bcf --ref-m3vcf /reference_prepared/m3vcf --threads 16
+```
+
+Single chromosome:
+
+```bash
+export OUTDIR=output_$(date +%Y%m%d_%H%M%S) && mkdir -p $OUTDIR && docker run --rm --privileged -v $PWD/new_imp/input_test_data:/input_data -v $PWD/$OUTDIR:/output_dir -v $PWD/new_imp/1000GRef:/vcf_ref -v $PWD/new_imp/1000G_prepared:/reference_prepared  imputation-pipeline:latest bash imputation_pipeline.sh --vcf /input_data/id_600.input_data.zip --out /output_dir --ref-path /vcf_ref --ref-bcf /reference_prepared/bcf --ref-m3vcf /reference_prepared/m3vcf --chr 2 --threads 8
+```
+
+Detached mode with log file:
+
+```bash
+export OUTDIR=output_$(date +%Y%m%d_%H%M%S) && mkdir -p $OUTDIR && docker run -d --rm --privileged -v $PWD/new_imp/input_test_data:/input_data -v $PWD/$OUTDIR:/output_dir -v $PWD/new_imp/1000GRef:/vcf_ref -v $PWD/new_imp/1000G_prepared:/reference_prepared --memory=32g --cpus=16 imputation-pipeline:latest bash -c 'bash imputation_pipeline.sh --vcf /input_data/id_600.input_data.zip --out output_dir --ref-path /vcf_ref --ref-bcf /reference_prepared/bcf --ref-msav /reference_prepared/msav --threads 16 2>&1 | tee /output_dir/pipeline.log'
+```
+
+#### imputation_pipeline_no_ancestry.sh
+
+```bash
+export OUTDIR=output_$(date +%Y%m%d_%H%M%S) && mkdir -p $OUTDIR && docker run -d --rm --privileged -v $PWD/new_imp/input_test_data:/input_data -v $PWD/$OUTDIR:/output_dir -v $PWD/new_imp/1000GRef:/vcf_ref -v $PWD/new_imp/1000G_prepared:/reference_prepared --memory=32g --cpus=16 imputation-pipeline:latest bash -c 'bash imputation_pipeline_no_ancestry.sh --vcf /input_data/id_600.input_data.zip --out output_dir --ref-path /vcf_ref --ref-bcf /reference_prepared/bcf --ref-msav /reference_prepared/msav --threads 16 2>&1 | tee /output_dir/pipeline.log'
+
+export OUTDIR=output_$(date +%Y%m%d_%H%M%S) && mkdir -p $OUTDIR && docker run --rm --privileged -v $PWD/new_imp/input_test_data:/input_data -v $PWD/$OUTDIR:/output_dir -v $PWD/new_imp/1000GRef:/vcf_ref -v $PWD/new_imp/1000G_prepared:/reference_prepared --memory=32g --cpus=16 imputation-pipeline:latest bash -c 'bash imputation_pipeline_no_ancestry.sh --vcf /input_data/id_600.input_data.zip --out output_dir --ref-path /vcf_ref --ref-bcf /reference_prepared/bcf --ref-msav /reference_prepared/msav --threads 16 2>&1 | tee /output_dir/pipeline.log'
+```
+
+#### preprocess.sh
+
+```bash
+export OUTDIR=output_$(date +%Y%m%d_%H%M%S) && mkdir -p $OUTDIR && docker run --rm --privileged -v $PWD/new_imp/input_test_data:/input_data -v $PWD/$OUTDIR:/output_dir -v $PWD/new_imp/1000GRef:/vcf_ref -v $PWD/new_imp/1000G_prepared:/reference_prepared --memory=32g --cpus=16 imputation-pipeline:latest bash -c 'bash preprocess.sh --vcf /input_data/id_600.input_data.zip --out /output_dir --ref-path /vcf_ref --ref-bcf /reference_prepared/bcf --ref-msav /reference_prepared/msav 2>&1 | tee /output_dir/pipeline.log'
 ```

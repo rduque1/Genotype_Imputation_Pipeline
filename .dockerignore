@@ -36,3 +36,9 @@ archived/
 *.tmp
 temp/
 tmp/
+
+input_test_data/
+archived/
+
+# Ignore Jupyter Notebook checkpoints
+.ipynb_checkpoints

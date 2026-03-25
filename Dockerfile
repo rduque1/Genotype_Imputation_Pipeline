@@ -41,6 +41,18 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /opt
 
 ################################################################################
+# Install Python packages
+################################################################################
+
+RUN pip3 install --no-cache-dir numpy pandas scipy matplotlib seaborn
+
+################################################################################
+# Install R packages
+################################################################################
+
+RUN R -e "install.packages(c('data.table', 'ggplot2', 'dplyr', 'tidyr'), repos='https://cloud.r-project.org/')"
+
+################################################################################
 # Install bcftools, samtools, and tabix (htslib)
 ################################################################################
 
@@ -112,6 +124,11 @@ RUN wget http://dalexander.github.io/admixture/binaries/admixture_linux-1.3.0.ta
 ################################################################################
 
 COPY required_tools/GenotypeHarmonizer /opt/GenotypeHarmonizer
+# Make the wrapper script executable and create a symlink in PATH
+# RUN chmod +x /opt/GenotypeHarmonizer/GenotypeHarmonizer.sh && ln -s /opt/GenotypeHarmonizer/GenotypeHarmonizer.sh /usr/local/bin/genotypeharmonizer
+RUN chmod +x /opt/GenotypeHarmonizer/GenotypeHarmonizer.sh && \
+    echo '#!/bin/bash\n/opt/GenotypeHarmonizer/GenotypeHarmonizer.sh "$@"' > /usr/local/bin/genotypeharmonizer && \
+    chmod +x /usr/local/bin/genotypeharmonizer
 
 ################################################################################
 # Install liftOver tool
@@ -122,28 +139,15 @@ RUN wget http://hgdownload.cse.ucsc.edu/admin/exe/linux.x86_64/liftOver && \
     mv liftOver /usr/local/bin/
 
 ################################################################################
-# Install Python packages
-################################################################################
-
-RUN pip3 install --no-cache-dir numpy pandas scipy matplotlib seaborn
-
-################################################################################
-# Install R packages
-################################################################################
-
-RUN R -e "install.packages(c('data.table', 'ggplot2', 'dplyr', 'tidyr'), repos='https://cloud.r-project.org/')"
-
-################################################################################
 # Copy required_tools directory and pipeline scripts
 ################################################################################
 
 COPY required_tools /pipeline/required_tools
 COPY scripts/ /pipeline/scripts/
-COPY imputation_pipeline.sh /pipeline/imputation_pipeline.sh
-COPY prepare_reference_panel.sh /pipeline/prepare_reference_panel.sh
+COPY *.sh /pipeline/
 
-RUN chmod +x /pipeline/imputation_pipeline.sh && \
-    chmod +x /pipeline/prepare_reference_panel.sh
+# Make all pipeline scripts executable
+RUN chmod +x /pipeline/*.sh
 
 ################################################################################
 # Set up environment

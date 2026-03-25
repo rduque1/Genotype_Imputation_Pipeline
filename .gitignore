@@ -9,3 +9,6 @@ submit*_ukbb_5-6.sh
 3_ancestry_analysis_quicktest.job
 3_ancestry_analysis_admixture_only.job
 3_ancestry_analysis-TOPMed_GRCh38.job
+
+
+input_test_data/
