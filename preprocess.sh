@@ -82,7 +82,7 @@ if [[ ! -f "$CLEANED_DATA" ]]; then
     exit 1
 fi
 
-cat "$CLEANED_DATA" | awk '{print $2}' | sort -Vu
+awk '{print $2}' "$CLEANED_DATA" | sort -Vu
 
 print_success "Step 1 complete: $CLEANED_DATA"
 
@@ -118,7 +118,7 @@ for chr in $target_chroms; do
     plink --bfile "${OUTROOT}/result" --chr "$chr" --make-bed --out "${OUTROOT}/result.chr${chr}.tmp"
     # Remove monomorphic variants (allele "0" in BIM) — Genotype Harmonizer crashes on these
     awk '$5 != "0" && $6 != "0" {print $2}' "${OUTROOT}/result.chr${chr}.tmp.bim" > "${OUTROOT}/result.chr${chr}.polymorphic.snps"
-    plink --bfile "${OUTROOT}/result.chr${chr}.tmp" --extract "${OUTROOT}/result.chr${chr}.polymorphic.snps" --make-bed --out "${OUTROOT}/result.chr${chr}"
+    plink --bfile "${OUTROOT}/result.chr${chr}.tmp" --extract "${OUTROOT}/result.chr${chr}.polymorphic.snps" --make-bed --output-chr M --out "${OUTROOT}/result.chr${chr}"
     rm -f "${OUTROOT}/result.chr${chr}.tmp".{bed,bim,fam,log,nosex} "${OUTROOT}/result.chr${chr}.polymorphic.snps"
     print_info "Split chromosome ${chr}: ${OUTROOT}/result.chr${chr}.bed"
 done
