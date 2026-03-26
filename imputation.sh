@@ -39,13 +39,16 @@ impute_chr() {
     print_info "Imputing chromosome ${chr}..."
 
     if [[ "$chr" == "X" ]]; then
-        for region in PAR1 nonPAR PAR2; do
-            local out_file="${prefix}.imputed.chrX_${region}.dose.vcf.gz"
+        # for region in PAR1 nonPAR PAR2; do
+        for region in nonPAR; do
+            # local out_file="${prefix}.imputed.chrX_${region}.dose.vcf.gz"
+            local out_file="${prefix}.imputed.chrX.dose.vcf.gz"
             if [[ -f "$out_file" ]]; then
                 print_info "Chromosome X ${region} already imputed, skipping: ${out_file}"
                 continue
             fi
             local myref="${REF_BASE}/ALL.chrX_${region}.phase3_shapeit2_mvncall_integrated_v1b.20130502.genotypes.msav"
+            print_info "Imputing chromosome X ${region} with reference ${myref}"
             minimac4 "$myref" "$vcf" \
                 --output "$out_file" \
                 --output-format vcf.gz \
@@ -59,6 +62,7 @@ impute_chr() {
             return
         fi
         local myref="${REF_BASE}/ALL.chr${chr}.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.msav"
+        print_info "Imputing chromosome ${chr} with reference ${myref}"
         minimac4 "$myref" "$vcf" \
             --output "$out_file" \
             --output-format vcf.gz \
