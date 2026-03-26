@@ -193,14 +193,30 @@ run_gh() {
     print_info "Processing chromosome ${chr}..."
 
     if [[ "$chr" == "X" || "$chr" == "23" ]]; then
-        java -Xmx16g -jar "$GH" --keep --input "${INPUT_PREFIX}.chr${chr}" \
-            --ref "${REF_PATH}/ALL.chrX.phase3_shapeit2_mvncall_integrated_v1b.20130502.genotypes.vcf.gz" \
-            --inputType PLINK_BED --callRateFilter 0.90 --output "./${PREFIX}.${LIFTED_CODE}.GH.chr${chr}" \
+        REF="${REF_PATH}/ALL.chrX.phase3_shapeit2_mvncall_integrated_v1b.20130502.genotypes.vcf.gz"
+        java -Xmx16g -jar "$GH" \
+            --keep \
+            --input "${INPUT_PREFIX}.chr${chr}" \
+            --ref "$REF" \
+            --inputType PLINK_BED \
+            --refType VCF \
+            --update-reference-allele \
+            --update-id \
+            --callRateFilter 0.90 \
+            --output "./${PREFIX}.${LIFTED_CODE}.GH.chr${chr}" \
             --debug
     else
-        java -Xmx16g -jar "$GH" --keep --input "${INPUT_PREFIX}.chr${chr}" \
-            --ref "${REF_PATH}/ALL.chr${chr}.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.vcf.gz" \
-            --inputType PLINK_BED --callRateFilter 0.90 --output "./${PREFIX}.${LIFTED_CODE}.GH.chr${chr}"
+        REF="${REF_PATH}/ALL.chr${chr}.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.vcf.gz"
+        java -Xmx16g -jar "$GH" \
+            --keep \
+            --input "${INPUT_PREFIX}.chr${chr}" \
+            --ref "$REF" \
+            --inputType PLINK_BED \
+            --refType VCF \
+            --update-reference-allele \
+            --update-id \
+            --callRateFilter 0.90 \
+            --output "./${PREFIX}.${LIFTED_CODE}.GH.chr${chr}"
     fi
 }
 
