@@ -121,6 +121,7 @@ for chr in $target_chroms; do
     plink --bfile "${OUTROOT}/result.chr${chr}.tmp" --extract "${OUTROOT}/result.chr${chr}.polymorphic.snps" --make-bed --output-chr M --out "${OUTROOT}/result.chr${chr}"
     rm -f "${OUTROOT}/result.chr${chr}.tmp".{bed,bim,fam,log,nosex} "${OUTROOT}/result.chr${chr}.polymorphic.snps"
     print_info "Split chromosome ${chr}: ${OUTROOT}/result.chr${chr}.bed"
+    print_info "Unique chromosomes in result.chr${chr}.bim: $(awk '{print $1}' "${OUTROOT}/result.chr${chr}.bim" | sort -Vu)"
 done
 
 print_success "Step 2b complete: split by chromosome"
